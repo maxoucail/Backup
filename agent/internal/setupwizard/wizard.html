@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration — Backup Agent</title>
+<style>
+	:root { --bg:#0b0f14; --panel:#121821; --border:#232d3b; --text:#e6edf3; --dim:#8b98a9; --accent:#4f8cff; --red:#e0555f; --green:#33c481; }
+	* { box-sizing: border-box; }
+	body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+		min-height:100vh; display:flex; align-items:center; justify-content:center; }
+	.card { width:420px; max-width:calc(100vw - 40px); background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:32px; }
+	h1 { font-size:1.2rem; margin:0 0 6px 0; display:flex; align-items:center; gap:8px; }
+	h1 .dot { width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px var(--accent); }
+	p.sub { color:var(--dim); font-size:.88rem; margin:0 0 22px 0; }
+	label { display:block; font-size:.82rem; color:var(--dim); margin:14px 0 6px 0; }
+	label:first-of-type { margin-top:0; }
+	input { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:8px; font-size:.9rem; }
+	button { width:100%; margin-top:20px; background:var(--accent); color:#fff; border:none; padding:11px; border-radius:8px; font-weight:600; cursor:pointer; font-size:.92rem; }
+	button:disabled { opacity:.6; cursor:not-allowed; }
+	.msg { margin-top:12px; font-size:.85rem; min-height:1.2em; }
+	.msg.error { color:var(--red); }
+	.msg.success { color:var(--green); }
+	.done { text-align:center; }
+</style>
+</head>
+<body>
+<div class="card">
+	<div id="form-view">
+		<h1><span class="dot"></span>Backup Agent</h1>
+		<p class="sub">Renseignez l'adresse de votre serveur de sauvegarde et la clé d'enrôlement générée depuis son panneau d'administration (Paramètres → Enrôler un nouvel appareil).</p>
+		<form id="f">
+			<label>Adresse du serveur</label>
+			<input id="server_url" placeholder="ex: 192.168.1.10:8420" required>
+			<label>Clé d'enrôlement</label>
+			<input id="token" required>
+			<label>Nom de cet appareil (facultatif)</label>
+			<input id="device_name" placeholder="ex: PC de Julie">
+			<button type="submit" id="submit-btn">Connecter cet appareil</button>
+			<div class="msg" id="msg"></div>
+		</form>
+	</div>
+	<div id="done-view" style="display:none;" class="done">
+		<h1 style="justify-content:center;"><span class="dot"></span>Appareil connecté</h1>
+		<p class="sub">Cet appareil est maintenant administré depuis le panneau du serveur. Vous pouvez fermer cette page.</p>
+	</div>
+</div>
+<script>
+document.getElementById("f").addEventListener("submit", async (e) => {
+	e.preventDefault();
+	const btn = document.getElementById("submit-btn");
+	const msg = document.getElementById("msg");
+	btn.disabled = true;
+	msg.className = "msg";
+	msg.textContent = "Connexion en cours…";
+	let serverUrl = document.getElementById("server_url").value.trim();
+	if (!/^https?:\/\//i.test(serverUrl)) serverUrl = "http://" + serverUrl;
+	try {
+		const res = await fetch("/submit", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				server_url: serverUrl,
+				token: document.getElementById("token").value.trim(),
+				device_name: document.getElementById("device_name").value.trim(),
+			}),
+		});
+		const data = await res.json();
+		if (!res.ok) throw new Error(data.error || "échec de la connexion");
+		document.getElementById("form-view").style.display = "none";
+		document.getElementById("done-view").style.display = "block";
+	} catch (err) {
+		msg.textContent = err.message;
+		msg.className = "msg error";
+		btn.disabled = false;
+	}
+});
+</script>
+</body>
+</html>

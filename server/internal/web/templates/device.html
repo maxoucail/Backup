@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Appareil — Backup Center</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app-shell">
+	<div id="sidebar-slot"></div>
+	<div class="main">
+		<div class="row between" style="align-items:flex-start;">
+			<div>
+				<h1 class="page-title" id="device-name">…</h1>
+				<p class="page-subtitle" id="device-sub">…</p>
+			</div>
+			<div class="row">
+				<button class="btn secondary small" id="rename-btn">Renommer</button>
+				<button class="btn small" id="backup-now-btn">Sauvegarder maintenant</button>
+				<button class="btn danger small" id="delete-btn">Supprimer</button>
+			</div>
+		</div>
+
+		<div class="grid grid-2" style="margin-bottom:16px;">
+			<div class="card">
+				<div class="section-title">Sauvegardes</div>
+				<table>
+					<thead><tr><th>Démarrée</th><th>Type</th><th>Statut</th><th>Fichiers</th><th>Taille</th><th>Progression</th><th></th></tr></thead>
+					<tbody id="snapshots-body"></tbody>
+				</table>
+				<div id="snapshots-empty" class="empty-state" style="display:none;">Aucune sauvegarde pour cet appareil.</div>
+			</div>
+
+			<div class="card">
+				<div class="section-title">Politique de sauvegarde</div>
+				<form id="policy-form">
+					<label>Intervalle (minutes)</label>
+					<input class="input" id="policy-interval" type="number" min="5" placeholder="valeur par défaut du serveur">
+					<label>Nombre de sauvegardes à conserver</label>
+					<input class="input" id="policy-retention" type="number" min="1" placeholder="valeur par défaut du serveur">
+					<label>Dossiers sauvegardés (un par ligne, vide = dossiers par défaut de l'utilisateur)</label>
+					<textarea class="input" id="policy-paths" rows="4" placeholder="ex: Desktop, Documents, Pictures, Downloads"></textarea>
+					<button class="btn" type="submit" style="margin-top:14px;">Enregistrer la politique</button>
+				</form>
+			</div>
+		</div>
+
+		<div class="card">
+			<div class="section-title">Historique des événements</div>
+			<table>
+				<thead><tr><th>Date</th><th>Niveau</th><th>Message</th></tr></thead>
+				<tbody id="events-body"></tbody>
+			</table>
+		</div>
+	</div>
+</div>
+
+<div class="modal-backdrop" id="restore-modal" style="display:none;">
+	<div class="modal">
+		<h3>Confirmer la restauration</h3>
+		<p class="muted">Cette action envoie une commande de restauration à l'appareil distant. Une fenêtre de progression s'affichera sur son écran.</p>
+		<div class="row" style="justify-content:flex-end; margin-top:18px;">
+			<button class="btn secondary" id="restore-cancel">Annuler</button>
+			<button class="btn" id="restore-confirm">Restaurer</button>
+		</div>
+	</div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+document.getElementById("sidebar-slot").outerHTML = renderSidebar("devices");
+wireLogout();
+
+const deviceId = window.location.pathname.split("/").pop();
+let pendingRestoreSnapshotId = null;
+
+function snapshotRow(s) {
+	const size = fmtBytes(s.logical_bytes);
+	const restoreBtn = s.status === "success"
+		? `<button class="btn secondary small" onclick="openRestoreModal('${s.id}')">Restaurer</button>`
+		: "";
+	const progress = s.status === "running"
+		? `<div class="progress-bar"><div style="width:${s.progress_percent}%"></div></div>`
+		: (s.status === "success" ? "100%" : "—");
+	return `<tr>
+		<td>${fmtDate(s.started_at)}</td>
+		<td class="muted">${s.kind === "manual" ? "manuelle" : "planifiée"}</td>
+		<td>${statusBadge(s.status)}</td>
+		<td>${s.file_count}</td>
+		<td>${size}</td>
+		<td style="min-width:100px;">${progress}</td>
+		<td>${restoreBtn}</td>
+	</tr>`;
+}
+
+function eventRow(e) {
+	return `<tr><td class="muted">${fmtDate(e.ts)}</td><td><span class="badge ${e.level === 'error' ? 'failed' : e.level === 'warning' ? 'cancelled' : 'success'}">${e.level}</span></td><td>${e.message}</td></tr>`;
+}
+
+function openRestoreModal(snapshotId) {
+	pendingRestoreSnapshotId = snapshotId;
+	document.getElementById("restore-modal").style.display = "flex";
+}
+document.getElementById("restore-cancel").addEventListener("click", () => {
+	document.getElementById("restore-modal").style.display = "none";
+});
+document.getElementById("restore-confirm").addEventListener("click", async () => {
+	document.getElementById("restore-modal").style.display = "none";
+	try {
+		await api("POST", `/api/devices/${deviceId}/restore`, { snapshot_id: pendingRestoreSnapshotId });
+		toast("Restauration déclenchée.", "success");
+		load();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
+
+document.getElementById("backup-now-btn").addEventListener("click", async () => {
+	try {
+		await api("POST", `/api/devices/${deviceId}/backup-now`);
+		toast("Sauvegarde déclenchée.", "success");
+		load();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
+
+document.getElementById("delete-btn").addEventListener("click", async () => {
+	if (!confirm("Supprimer définitivement cet appareil et toutes ses sauvegardes ?")) return;
+	try {
+		await api("DELETE", `/api/devices/${deviceId}`);
+		window.location.href = "/devices";
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
+
+document.getElementById("rename-btn").addEventListener("click", async () => {
+	const name = prompt("Nouveau nom de l'appareil :");
+	if (!name) return;
+	try {
+		await api("PATCH", `/api/devices/${deviceId}`, { name });
+		load();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
+
+document.getElementById("policy-form").addEventListener("submit", async (e) => {
+	e.preventDefault();
+	const interval = document.getElementById("policy-interval").value;
+	const retention = document.getElementById("policy-retention").value;
+	const pathsRaw = document.getElementById("policy-paths").value;
+	const paths = pathsRaw.split("\n").map(s => s.trim()).filter(Boolean);
+	try {
+		await api("PATCH", `/api/devices/${deviceId}`, {
+			interval_minutes: interval ? parseInt(interval, 10) : null,
+			retention_count: retention ? parseInt(retention, 10) : null,
+			backup_paths: paths,
+		});
+		toast("Politique enregistrée.", "success");
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
+
+async function load() {
+	try {
+		const data = await api("GET", `/api/devices/${deviceId}`);
+		const d = data.device;
+		document.getElementById("device-name").textContent = d.name;
+		document.getElementById("device-sub").innerHTML =
+			`<span class="badge ${d.online ? 'online' : 'offline'}"><span class="dot"></span>${d.online ? 'en ligne' : 'hors ligne'}</span>
+			 &nbsp; ${d.os_name || ''} ${d.os_version || ''} &nbsp;·&nbsp; agent v${d.agent_version || '?'} &nbsp;·&nbsp; vu ${fmtRelative(d.last_seen)}`;
+		document.getElementById("backup-now-btn").disabled = !d.online;
+
+		if (d.interval_minutes) document.getElementById("policy-interval").value = d.interval_minutes;
+		if (d.retention_count) document.getElementById("policy-retention").value = d.retention_count;
+		if (d.backup_paths) {
+			try { document.getElementById("policy-paths").value = (JSON.parse(d.backup_paths) || []).join("\n"); } catch (e) {}
+		}
+
+		const snaps = data.snapshots || [];
+		document.getElementById("snapshots-body").innerHTML = snaps.map(snapshotRow).join("");
+		document.getElementById("snapshots-empty").style.display = snaps.length ? "none" : "block";
+
+		document.getElementById("events-body").innerHTML = (data.events || []).slice(0, 100).map(eventRow).join("");
+	} catch (err) {
+		toast("Erreur de chargement : " + err.message, "error");
+	}
+}
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>

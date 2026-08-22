@@ -1,0 +1,21 @@
+# Build artifacts
+/server/backup-server
+/agent/backup-agent
+/agent/packaging/windows/backup-agent.exe
+/agent/packaging/windows/BackupAgentSetup.exe
+/agent/packaging/macos/dist/
+/agent/packaging/macos/backup-agent-amd64
+/agent/packaging/macos/backup-agent-arm64
+/agent/packaging/macos/BackupAgent-macOS-*.tar.gz
+/agent/packaging/macos/BackupAgent-*.pkg
+/agent/packaging/macos/pkgroot/
+/agent/packaging/macos/scripts/
+
+# Local runtime data if the server or agent is run from a repo checkout
+/server/data/
+*.db
+*.db-wal
+*.db-shm
+
+# OS cruft
+.DS_Store

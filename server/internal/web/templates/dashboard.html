@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tableau de bord — Backup Center</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app-shell">
+	<div id="sidebar-slot"></div>
+	<div class="main">
+		<h1 class="page-title">Tableau de bord</h1>
+		<p class="page-subtitle">Vue d'ensemble de la flotte et du stockage.</p>
+
+		<div class="grid grid-4" style="margin-bottom:16px;">
+			<div class="card"><div class="stat-label">Appareils</div><div class="stat-value" id="stat-devices">—</div></div>
+			<div class="card"><div class="stat-label">En ligne</div><div class="stat-value" id="stat-online">—</div></div>
+			<div class="card"><div class="stat-label">Stockage utilisé</div><div class="stat-value small" id="stat-storage">—</div></div>
+			<div class="card"><div class="stat-label">Sauvegardes (14 j)</div><div class="stat-value" id="stat-backups">—</div></div>
+		</div>
+
+		<div class="grid grid-2" style="margin-bottom:16px;">
+			<div class="card">
+				<div class="section-title">Sauvegardes par jour (14 derniers jours)</div>
+				<canvas class="chart" id="chart-daily"></canvas>
+			</div>
+			<div class="card">
+				<div class="section-title">Stockage par appareil</div>
+				<canvas class="chart" id="chart-storage"></canvas>
+			</div>
+		</div>
+
+		<div class="card" style="margin-bottom:16px;">
+			<div class="row between" style="margin-bottom:14px;">
+				<div class="section-title" style="margin:0;">Appareils</div>
+				<a class="btn small" href="/devices">Gérer les appareils →</a>
+			</div>
+			<table>
+				<thead><tr><th>Nom</th><th>Statut</th><th>OS</th><th>Dernière sauvegarde</th><th>Taille</th></tr></thead>
+				<tbody id="devices-table-body"></tbody>
+			</table>
+			<div id="devices-empty" class="empty-state" style="display:none;">
+				Aucun appareil enrôlé pour l'instant. Rendez-vous dans <a href="/settings">Paramètres</a> pour générer une clé d'enrôlement.
+			</div>
+		</div>
+
+		<div class="card">
+			<div class="section-title">Événements récents</div>
+			<table>
+				<thead><tr><th>Date</th><th>Niveau</th><th>Message</th></tr></thead>
+				<tbody id="events-table-body"></tbody>
+			</table>
+		</div>
+	</div>
+</div>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/charts.js"></script>
+<script>
+document.getElementById("sidebar-slot").outerHTML = renderSidebar("dashboard");
+wireLogout();
+
+function deviceRow(d) {
+	const last = d.latest_snapshot;
+	const size = last ? fmtBytes(last.logical_bytes) : "—";
+	const lastDate = last ? fmtDate(last.started_at) : "jamais";
+	return `<tr class="clickable" onclick="location.href='/devices/${d.id}'">
+		<td>${d.name}</td>
+		<td><span class="badge ${d.online ? 'online' : 'offline'}"><span class="dot"></span>${d.online ? 'en ligne' : 'hors ligne'}</span></td>
+		<td class="muted">${d.os_name || '—'}</td>
+		<td>${lastDate}</td>
+		<td>${size}</td>
+	</tr>`;
+}
+
+function eventRow(e) {
+	return `<tr><td class="muted">${fmtDate(e.ts)}</td><td><span class="badge ${e.level === 'error' ? 'failed' : e.level === 'warning' ? 'cancelled' : 'success'}">${e.level}</span></td><td>${e.message}</td></tr>`;
+}
+
+async function load() {
+	try {
+		const data = await api("GET", "/api/dashboard");
+		document.getElementById("stat-devices").textContent = data.devices_total;
+		document.getElementById("stat-online").textContent = data.devices_online;
+		document.getElementById("stat-storage").textContent = fmtBytes(data.storage_used_bytes);
+		const totalBackups = (data.backups_per_day || []).reduce((a, b) => a + b.count, 0);
+		document.getElementById("stat-backups").textContent = totalBackups;
+
+		const days = data.backups_per_day || [];
+		drawLineChart(document.getElementById("chart-daily"), days.map(d => d.date), days.map(d => d.count));
+
+		const devicesWithSize = (data.devices || []).filter(d => d.latest_snapshot).slice(0, 8);
+		drawBarChart(document.getElementById("chart-storage"),
+			devicesWithSize.map(d => d.name),
+			devicesWithSize.map(d => d.latest_snapshot.logical_bytes));
+
+		const body = document.getElementById("devices-table-body");
+		body.innerHTML = (data.devices || []).map(deviceRow).join("");
+		document.getElementById("devices-empty").style.display = (data.devices || []).length ? "none" : "block";
+
+		document.getElementById("events-table-body").innerHTML = (data.recent_events || []).slice(0, 15).map(eventRow).join("");
+	} catch (err) {
+		toast("Erreur de chargement : " + err.message, "error");
+	}
+}
+
+load();
+setInterval(load, 8000);
+</script>
+</body>
+</html>

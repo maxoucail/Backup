@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Appareils — Backup Center</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app-shell">
+	<div id="sidebar-slot"></div>
+	<div class="main">
+		<h1 class="page-title">Appareils</h1>
+		<p class="page-subtitle">Tous les postes enrôlés et leur dernier état de sauvegarde.</p>
+
+		<div class="card">
+			<table>
+				<thead><tr><th>Nom</th><th>Statut</th><th>OS</th><th>Dernière sauvegarde</th><th>Taille</th><th>Sauvegardes conservées</th><th></th></tr></thead>
+				<tbody id="devices-table-body"></tbody>
+			</table>
+			<div id="devices-empty" class="empty-state" style="display:none;">
+				Aucun appareil enrôlé pour l'instant. Rendez-vous dans <a href="/settings">Paramètres</a> pour générer une clé d'enrôlement, puis installez l'agent sur un poste Windows ou macOS.
+			</div>
+		</div>
+	</div>
+</div>
+<script src="/static/js/api.js"></script>
+<script>
+document.getElementById("sidebar-slot").outerHTML = renderSidebar("devices");
+wireLogout();
+
+function row(d) {
+	const last = d.latest_snapshot;
+	const size = last ? fmtBytes(last.logical_bytes) : "—";
+	const lastDate = last ? fmtDate(last.started_at) : "jamais";
+	return `<tr class="clickable" onclick="location.href='/devices/${d.id}'">
+		<td>${d.name}</td>
+		<td><span class="badge ${d.online ? 'online' : 'offline'}"><span class="dot"></span>${d.online ? 'en ligne' : 'hors ligne'}</span></td>
+		<td class="muted">${d.os_name || '—'} ${d.os_version || ''}</td>
+		<td>${lastDate}</td>
+		<td>${size}</td>
+		<td>${d.snapshot_count}</td>
+		<td><button class="btn small" onclick="event.stopPropagation(); backupNow('${d.id}')" ${d.online ? '' : 'disabled title="appareil hors ligne"'}>Sauvegarder</button></td>
+	</tr>`;
+}
+
+async function backupNow(id) {
+	try {
+		await api("POST", `/api/devices/${id}/backup-now`);
+		toast("Sauvegarde déclenchée.", "success");
+	} catch (err) {
+		toast(err.message, "error");
+	}
+}
+
+async function load() {
+	try {
+		const devices = await api("GET", "/api/devices");
+		document.getElementById("devices-table-body").innerHTML = devices.map(row).join("");
+		document.getElementById("devices-empty").style.display = devices.length ? "none" : "block";
+	} catch (err) {
+		toast("Erreur de chargement : " + err.message, "error");
+	}
+}
+load();
+setInterval(load, 8000);
+</script>
+</body>
+</html>

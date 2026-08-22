@@ -1,0 +1,122 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: server/go.sum
+      - run: go vet ./...
+      - run: go build -o backup-server ./cmd/backup-server
+      - run: go test ./...
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backup-server-linux-amd64
+          path: server/backup-server
+
+  # Windows installer and the macOS tarball both cross-compile from plain
+  # Go plus NSIS (a normal Linux package) - no Windows or macOS runner
+  # needed for these, which keeps the common case fast and free of
+  # per-OS-runner flakiness.
+  agents:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: agent/go.sum
+      - run: go vet ./...
+      - run: go build ./...
+
+      - name: Install NSIS
+        run: sudo apt-get update && sudo apt-get install -y nsis
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Windows installer
+        run: ./packaging/windows/build.sh "${{ steps.version.outputs.version }}"
+
+      - name: Build macOS package
+        run: ./packaging/macos/build.sh "${{ steps.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BackupAgentSetup-windows
+          path: agent/packaging/windows/BackupAgentSetup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BackupAgent-macos
+          path: agent/packaging/macos/BackupAgent-macOS-*.tar.gz
+
+  # Optional: a signed/notarized .pkg with a native macOS installer
+  # experience, built only when the repo has Apple Developer signing
+  # secrets configured. Skipped (not failed) otherwise - the tarball from
+  # the `agents` job above is the one every release always has.
+  agent-macos-pkg:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: agent/packaging/macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Build unsigned .pkg (skips signing/notarizing without secrets)
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          PKGSIGN_IDENTITY: ${{ secrets.MACOS_PKGSIGN_IDENTITY }}
+        run: ./pkgbuild.sh "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BackupAgent-macos-pkg
+          path: agent/packaging/macos/BackupAgent-*.pkg
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server, agents]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub release with build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            artifacts/backup-server-linux-amd64/backup-server \
+            artifacts/BackupAgentSetup-windows/BackupAgentSetup.exe \
+            artifacts/BackupAgent-macos/*.tar.gz

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title id="title">Backup Agent</title>
+<style>
+	:root { --bg:#0b0f14; --panel:#121821; --border:#232d3b; --text:#e6edf3; --dim:#8b98a9; --accent:#4f8cff; --red:#e0555f; --green:#33c481; }
+	* { box-sizing:border-box; }
+	body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+		min-height:100vh; display:flex; align-items:center; justify-content:center; }
+	.card { width:440px; max-width:calc(100vw - 40px); background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:32px; }
+	h1 { font-size:1.15rem; margin:0 0 4px 0; display:flex; align-items:center; gap:8px; }
+	.dot { width:10px; height:10px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px var(--accent); flex:none; }
+	.dot.ok { background:var(--green); box-shadow:0 0 8px var(--green); }
+	.dot.err { background:var(--red); box-shadow:0 0 8px var(--red); }
+	p.phase { color:var(--dim); font-size:.88rem; margin:0 0 22px 0; }
+	.bar { height:8px; background:var(--border); border-radius:999px; overflow:hidden; }
+	.bar > div { height:100%; background:linear-gradient(90deg,#4f8cff,#7c5cff); width:0%; transition:width .3s ease; }
+	.row { display:flex; justify-content:space-between; margin-top:12px; font-size:.85rem; color:var(--dim); }
+	.pct { font-size:1.6rem; font-weight:700; margin-top:16px; }
+</style>
+</head>
+<body>
+<div class="card">
+	<h1><span class="dot" id="dot"></span><span id="title-text">Sauvegarde en cours</span></h1>
+	<p class="phase" id="phase">Préparation…</p>
+	<div class="pct" id="pct">0%</div>
+	<div class="bar"><div id="bar-fill"></div></div>
+	<div class="row">
+		<span id="detail"></span>
+		<span id="eta"></span>
+	</div>
+</div>
+<script>
+const phaseLabels = {
+	scanning: "Analyse des dossiers…",
+	hashing: "Vérification des fichiers modifiés…",
+	uploading: "Envoi des données vers le serveur…",
+	finalizing: "Finalisation…",
+	fetching_manifest: "Récupération de la sauvegarde…",
+	restoring: "Restauration des fichiers…",
+};
+
+function fmtEta(s) {
+	if (!s || s <= 0) return "";
+	if (s < 60) return Math.ceil(s) + " s restantes";
+	if (s < 3600) return Math.ceil(s / 60) + " min restantes";
+	return (s / 3600).toFixed(1) + " h restantes";
+}
+function fmtBytes(b) {
+	if (!b) return "0 o";
+	const u = ["o","Ko","Mo","Go","To"]; let v=b,i=0;
+	while (v>=1024 && i<u.length-1) { v/=1024; i++; }
+	return v.toFixed(i===0?0:1)+" "+u[i];
+}
+
+async function poll() {
+	try {
+		const s = await (await fetch("/state")).json();
+		document.getElementById("title-text").textContent = s.title;
+		document.title = s.title;
+		document.getElementById("phase").textContent = phaseLabels[s.phase] || s.phase;
+		document.getElementById("pct").textContent = Math.round(s.percent) + "%";
+		document.getElementById("bar-fill").style.width = s.percent + "%";
+		document.getElementById("eta").textContent = fmtEta(s.eta_seconds);
+		document.getElementById("detail").textContent = s.detail_bytes ? fmtBytes(s.detail_bytes) : "";
+		const dot = document.getElementById("dot");
+		if (s.done) {
+			dot.className = "dot " + (s.error ? "err" : "ok");
+			document.getElementById("phase").textContent = s.error ? ("Échec : " + s.error) : "Terminé avec succès.";
+			document.getElementById("bar-fill").style.width = "100%";
+			document.getElementById("pct").textContent = s.error ? "!" : "✓";
+			return;
+		}
+		setTimeout(poll, 500);
+	} catch (e) {
+		setTimeout(poll, 1500);
+	}
+}
+poll();
+</script>
+</body>
+</html>

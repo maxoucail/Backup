@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connexion — Backup Center</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="login-shell">
+	<div class="login-card">
+		<div class="brand"><span class="dot"></span>Backup Center</div>
+		<form id="login-form">
+			<label for="username">Utilisateur</label>
+			<input class="input" id="username" name="username" autocomplete="username" required>
+			<label for="password">Mot de passe</label>
+			<input class="input" id="password" name="password" type="password" autocomplete="current-password" required>
+			<div class="error-text" id="error-text"></div>
+			<button class="btn" type="submit" style="width:100%; margin-top: 6px;">Se connecter</button>
+		</form>
+	</div>
+</div>
+<script src="/static/js/api.js"></script>
+<script>
+document.getElementById("login-form").addEventListener("submit", async (e) => {
+	e.preventDefault();
+	const username = document.getElementById("username").value;
+	const password = document.getElementById("password").value;
+	const errorEl = document.getElementById("error-text");
+	errorEl.textContent = "";
+	try {
+		await api("POST", "/api/auth/login", { username, password });
+		window.location.href = "/";
+	} catch (err) {
+		errorEl.textContent = err.message;
+	}
+});
+</script>
+</body>
+</html>
