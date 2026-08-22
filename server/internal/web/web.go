@@ -26,7 +26,7 @@ type Web struct {
 }
 
 func New(sessions *auth.SessionSigner) (*Web, error) {
-	names := []string{"login.html", "dashboard.html", "devices.html", "device.html", "settings.html"}
+	names := []string{"login.html", "dashboard.html", "devices.html", "device.html", "settings.html", "download.html"}
 	templates := make(map[string]*template.Template, len(names))
 	for _, name := range names {
 		t, err := template.ParseFS(templatesFS, "templates/"+name)
@@ -57,6 +57,10 @@ func (w2 *Web) isAuthenticated(r *http.Request) bool {
 func (w2 *Web) Register(mux *http.ServeMux) {
 	staticSub, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+
+	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
+		w2.render(w, "download.html")
+	})
 
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
 		if w2.isAuthenticated(r) {

@@ -195,6 +195,60 @@ une erreur d'authentification (secret révoqué) que l'agent interprète comme
 rouvre l'assistant de première configuration, prêt à être réenrôlé avec une
 nouvelle clé.
 
+## Dossiers redirigés (Windows)
+
+`internal/knownfolders` lit `HKCU\...\Explorer\User Shell Folders` (ou
+`HKEY_USERS\<SID>\...` depuis le service, `HKCU` y désignant le compte
+LocalSystem et non l'utilisateur console) pour résoudre l'emplacement réel
+de Bureau/Documents/Téléchargements/Images, y compris quand ils ont été
+déplacés vers un autre disque. C'est un complément, pas un remplacement,
+au choix manuel de dossiers depuis le panneau (`scanner.ResolveRoots`
+accepte déjà des chemins absolus arbitraires) : par défaut l'agent trouve
+tout seul le bon disque, et l'opérateur peut toujours forcer des chemins
+précis par appareil si besoin.
+
+## Icône de la barre des tâches (Windows)
+
+Le service expose une API de contrôle minimaliste en local
+(`127.0.0.1:47812`, `internal/tray` côté client) : état (date de dernière
+sauvegarde, connexion), déclenchement manuel, reprogrammation. L'icône
+elle-même (`backup-agent.exe --tray`) est un processus séparé, lancé dans
+la session console par le même mécanisme `CreateProcessAsUser` que
+l'assistant/la popup - implémenté en Win32 pur (`Shell_NotifyIconW`,
+fenêtre cachée, menu contextuel), sans CGO. Son isolement en processus à
+part garantit qu'un problème dans l'icône n'affecte jamais le service de
+sauvegarde lui-même. Une reprogrammation locale ne fait que déplacer
+l'échéance planifiée normale ; une commande du serveur (`backup_now`,
+`restore`) est traitée indépendamment dans la boucle WebSocket principale
+et n'est donc jamais retardée par quoi que ce soit venant de l'icône -
+c'est ce qui garde le serveur prioritaire par construction, pas par une
+règle de priorité explicite à maintenir.
+
+**Non implémenté dans cette passe** : l'équivalent macOS (icône de barre
+de menu) nécessiterait CGO (NSStatusBar), incompatible avec la
+cross-compilation depuis Linux sans machine Mac ; à envisager comme job CI
+dédié tournant sur un runner macOS si besoin.
+
+## Téléchargement en libre-service et test de stockage
+
+`server/internal/api/downloads.go` sert un dossier `downloads/` sous le
+répertoire de données du serveur : liste (`GET /api/downloads`) et
+téléchargement (`GET /downloads/{nom}`) sont volontairement non
+authentifiés - un installeur n'est pas une donnée sensible, et exiger un
+compte pour le récupérer irait à l'encontre du but (n'importe quel poste
+à sauvegarder doit pouvoir se le procurer). Seuls l'upload et la
+suppression, depuis **Paramètres**, exigent une session admin. Le nom de
+fichier est toujours réduit à sa base (`filepath.Base`) et revérifié comme
+restant sous `downloads/` avant tout accès disque, contre la traversée de
+chemin.
+
+Le test de connectivité du stockage (`POST /api/settings/test-storage`)
+écrit un fichier témoin, attend 6 secondes, le relit puis le supprime -
+un délai délibéré pour distinguer un montage NAS qui accepte l'écriture
+mais la perd (déconnexion, cache local non synchronisé) d'un chemin
+réellement fiable, plutôt qu'un simple test d'écriture instantanée qui ne
+détecterait pas ce cas.
+
 ## Pourquoi Go plutôt que Python/Node
 
 - Binaire statique unique par plateforme : aucune dépendance runtime à

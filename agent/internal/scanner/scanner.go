@@ -11,22 +11,22 @@ import (
 	"os"
 	"path/filepath"
 
+	"backup-agent/internal/knownfolders"
 	"backup-agent/internal/userctx"
 )
 
 var defaultFolderNames = []string{"Desktop", "Downloads", "Documents", "Pictures"}
 
-// DefaultRoots returns the standard per-user folders to back up.
+// DefaultRoots returns the standard per-user folders to back up, resolved
+// to their real current location - which on Windows may well not be under
+// the home directory at all, if the user (or their IT department) moved
+// one to another drive via the folder's Properties > Location tab.
 // Non-existent folders (e.g. a fresh account with no Pictures folder yet)
 // are silently skipped rather than treated as an error.
 func DefaultRoots() []string {
-	home, err := userctx.HomeDir()
-	if err != nil {
-		return nil
-	}
 	var roots []string
 	for _, name := range defaultFolderNames {
-		p := filepath.Join(home, name)
+		p := knownfolders.Resolve(name)
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
 			roots = append(roots, p)
 		}

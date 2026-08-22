@@ -50,7 +50,7 @@ func main() {
 
 	sessions := auth.NewSessionSigner(cfg.SessionSecret)
 	hub := ws.NewHub(sqlDB)
-	apiServer := api.New(sqlDB, storeHolder, hub, sessions)
+	apiServer := api.New(sqlDB, storeHolder, hub, sessions, cfg.DownloadsDir)
 	webServer, err := web.New(sessions)
 	if err != nil {
 		log.Fatalf("panneau web: %v", err)

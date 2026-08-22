@@ -18,6 +18,7 @@ type Config struct {
 	DataDir       string
 	DBPath        string
 	StorageRoot   string
+	DownloadsDir  string
 	ListenHost    string
 	ListenPort    string
 	SessionSecret string
@@ -48,10 +49,16 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	downloadsDir := filepath.Join(dataDir, "downloads")
+	if err := os.MkdirAll(downloadsDir, 0o750); err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		DataDir:       dataDir,
 		DBPath:        filepath.Join(dataDir, "server.db"),
 		StorageRoot:   storageRoot,
+		DownloadsDir:  downloadsDir,
 		ListenHost:    envOr("BACKUP_SERVER_HOST", "0.0.0.0"),
 		ListenPort:    envOr("BACKUP_SERVER_PORT", "8420"),
 		SessionSecret: secret,

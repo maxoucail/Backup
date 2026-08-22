@@ -18,14 +18,15 @@ import (
 )
 
 type API struct {
-	DB       *sql.DB
-	Store    *storage.Holder
-	Hub      *ws.Hub
-	Sessions *auth.SessionSigner
+	DB           *sql.DB
+	Store        *storage.Holder
+	Hub          *ws.Hub
+	Sessions     *auth.SessionSigner
+	DownloadsDir string
 }
 
-func New(db *sql.DB, store *storage.Holder, hub *ws.Hub, sessions *auth.SessionSigner) *API {
-	return &API{DB: db, Store: store, Hub: hub, Sessions: sessions}
+func New(db *sql.DB, store *storage.Holder, hub *ws.Hub, sessions *auth.SessionSigner, downloadsDir string) *API {
+	return &API{DB: db, Store: store, Hub: hub, Sessions: sessions, DownloadsDir: downloadsDir}
 }
 
 // --- small JSON helpers -----------------------------------------------------

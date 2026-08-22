@@ -11,6 +11,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	// Public.
 	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
 	mux.HandleFunc("POST /api/agent/enroll", a.handleAgentEnroll)
+	mux.HandleFunc("GET /api/downloads", a.handleListDownloads)
+	mux.HandleFunc("GET /downloads/{name}", a.handleDownloadFile)
 
 	// Panel session.
 	mux.HandleFunc("POST /api/auth/logout", a.requireSession(a.handleLogout))
@@ -31,9 +33,15 @@ func (a *API) Register(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/settings", a.requireSession(a.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", a.requireSession(a.handleUpdateSettings))
+	mux.HandleFunc("POST /api/settings/test-storage", a.requireSession(a.handleTestStorage))
 
 	mux.HandleFunc("POST /api/enrollment-keys", a.requireSession(a.handleCreateEnrollmentKey))
 	mux.HandleFunc("GET /api/enrollment-keys", a.requireSession(a.handleListEnrollmentKeys))
+
+	mux.HandleFunc("POST /api/downloads/upload", a.requireSession(a.handleUploadDownload))
+	mux.HandleFunc("DELETE /api/downloads/{name}", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
+		a.handleDeleteDownload(w, r, r.PathValue("name"))
+	}))
 
 	// Agent data plane.
 	mux.HandleFunc("GET /api/agent/config", a.requireDevice(a.handleAgentGetConfig))

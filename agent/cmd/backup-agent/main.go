@@ -11,10 +11,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,6 +29,7 @@ import (
 	"backup-agent/internal/backupjob"
 	"backup-agent/internal/client"
 	"backup-agent/internal/config"
+	"backup-agent/internal/knownfolders"
 	"backup-agent/internal/macdaemon"
 	"backup-agent/internal/osinfo"
 	"backup-agent/internal/osui"
@@ -37,6 +40,7 @@ import (
 	"backup-agent/internal/scanner"
 	"backup-agent/internal/setupwizard"
 	"backup-agent/internal/svcmode"
+	"backup-agent/internal/tray"
 	"backup-agent/internal/userctx"
 	"backup-agent/internal/winsession"
 )
@@ -49,6 +53,14 @@ const defaultRetentionCount = 7
 const defaultChunkSize = 16 * 1024 * 1024
 const missedBackupGrace = 10 * time.Minute
 
+// trayControlAddr is where the Windows Service exposes its small local
+// control API for the tray helper process (last backup date, "back up
+// now", "reschedule"). Fixed rather than discovered: the tray helper and
+// the service are always the same machine, same install, so there's
+// nothing to discover.
+const trayControlAddr = "127.0.0.1:47812"
+const trayControlBaseURL = "http://" + trayControlAddr
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -56,6 +68,9 @@ func main() {
 			if len(os.Args) > 2 {
 				_ = osui.OpenBrowser(os.Args[2])
 			}
+			return
+		case "--tray": // internal: the notification-area icon helper, launched by the service
+			_ = tray.Run(trayControlBaseURL)
 			return
 		case "install":
 			if err := installSelf(); err != nil {
@@ -145,9 +160,15 @@ func runServiceMode(ctx context.Context) {
 	switch runtime.GOOS {
 	case "windows":
 		userctx.HomeDir = winsession.ConsoleUserHomeDir
+		if sid, err := winsession.ConsoleUserSID(); err == nil {
+			knownfolders.UserSID = sid
+		} else {
+			log.Printf("avertissement: SID de l'utilisateur console introuvable, détection des dossiers redirigés désactivée: %v", err)
+		}
 		osui.ShowURL = func(url string) error {
 			return winsession.LaunchInConsoleSession(exePath, []string{"--show-url", url})
 		}
+		go ensureTrayHelperRunning(ctx, exePath)
 	case "darwin":
 		userctx.HomeDir = macdaemon.ConsoleUserHomeDir
 		osui.ShowURL = func(url string) error {
@@ -157,6 +178,30 @@ func runServiceMode(ctx context.Context) {
 
 	log.Printf("backup-agent %s démarré en service système", AgentVersion)
 	mainLoop(ctx)
+}
+
+// ensureTrayHelperRunning launches the notification-area icon into the
+// console user's session. Retries with backoff until it succeeds (there
+// may be no one logged in yet right after boot); once launched it isn't
+// re-supervised for the rest of this service run - if the user logs off
+// and back on, the icon reappears at the next service restart. A fuller
+// version would watch WTS session-change notifications; this simpler
+// version was judged good enough for a first pass.
+func ensureTrayHelperRunning(ctx context.Context, exePath string) {
+	delay := 5 * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if err := winsession.LaunchInConsoleSession(exePath, []string{"--tray"}); err != nil {
+			delay = 30 * time.Second
+			continue
+		}
+		log.Print("icône de la barre des tâches lancée dans la session utilisateur")
+		return
+	}
 }
 
 // runForeground is the per-user path: a manual run, a dev/test run, or
@@ -336,6 +381,22 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 	}
 
+	// Last-backup state, surfaced to the tray icon's tooltip/menu via the
+	// control API below.
+	var lastBackupMu sync.Mutex
+	var lastBackupAt time.Time
+	var lastBackupStatus string
+	recordLastBackup := func(status string) {
+		lastBackupMu.Lock()
+		lastBackupAt, lastBackupStatus = time.Now(), status
+		lastBackupMu.Unlock()
+	}
+	readLastBackup := func() (time.Time, string) {
+		lastBackupMu.Lock()
+		defer lastBackupMu.Unlock()
+		return lastBackupAt, lastBackupStatus
+	}
+
 	warnIfBlocked := func(roots []string) {
 		blocked := scanner.CheckAccess(roots)
 		if len(blocked) == 0 {
@@ -387,6 +448,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		} else {
 			log.Printf("sauvegarde terminée: %d fichiers, %d octets envoyés", result.FileCount, result.UploadedBytes)
 		}
+		recordLastBackup(status)
 		wsc.Send(protocol.Envelope{Type: protocol.TypeBackupFinished, Status: status, ErrorMessage: errMsg})
 		if popup != nil {
 			popup.Finish(errMsg)
@@ -432,6 +494,10 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 		wsc.Send(protocol.Envelope{Type: protocol.TypeRestoreFinished, SnapshotID: snapshotID, Status: status, ErrorMessage: errMsg})
 		popup.Finish(errMsg)
+	}
+
+	if runtime.GOOS == "windows" && svcmode.IsWindowsService() {
+		startTrayControlAPI(agentCtx, cfg, mutateCfg, wsc, runBackup, readLastBackup)
 	}
 
 	refreshPolicy := func() {
@@ -631,3 +697,123 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 	}
 }
+
+// startTrayControlAPI exposes the small local HTTP API the tray helper
+// process (internal/tray, launched into the console session) talks to:
+// it has no other way to reach the service, and this is deliberately
+// tiny (four endpoints) since anything reachable on localhost by *any*
+// process on the machine should stay minimal. A backup triggered here
+// goes through the exact same runBackup as a remote "Sauvegarder
+// maintenant" from the panel - the server's own commands (backup_now,
+// restore, cancel) are handled independently in the main WS loop and are
+// never blocked or delayed by anything the tray does, which is what
+// keeps the server always authoritative.
+func startTrayControlAPI(
+	ctx context.Context, cfg *config.Config, mutateCfg func(func(*config.Config)),
+	wsc *client.WSClient, runBackup func(kind string, popup *progressui.Popup),
+	readLastBackup func() (time.Time, string),
+) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /tray/state", func(w http.ResponseWriter, r *http.Request) {
+		at, status := readLastBackup()
+		lastAt := ""
+		if !at.IsZero() {
+			lastAt = at.Format(time.RFC3339)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_name":        cfg.DeviceName,
+			"last_backup_at":     lastAt,
+			"last_backup_status": status,
+			"connected":          wsc.Connected(),
+		})
+	})
+
+	mux.HandleFunc("POST /tray/backup-now", func(w http.ResponseWriter, r *http.Request) {
+		go runBackup(protocol.SnapshotKindManual, nil)
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	mux.HandleFunc("GET /tray/reschedule-page", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(trayReschedulePageHTML))
+	})
+
+	mux.HandleFunc("POST /tray/reschedule", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			At string `json:"at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		t, err := time.Parse(time.RFC3339, req.At)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mutateCfg(func(c *config.Config) {
+			c.PendingCatchUpAt = &t
+			c.NextScheduledAt = &t
+			c.CatchUpNotifiedT15, c.CatchUpNotifiedT5 = false, false
+		})
+		log.Printf("prochaine sauvegarde reprogrammée depuis la barre des tâches pour %s", t.Format(time.RFC1123))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+
+	mux.HandleFunc("GET /tray/open-panel", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, cfg.ServerURL, http.StatusFound)
+	})
+
+	srv := &http.Server{Addr: trayControlAddr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("API de contrôle pour la barre des tâches indisponible: %v", err)
+		}
+	}()
+}
+
+const trayReschedulePageHTML = `<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reprogrammer — Backup Agent</title>
+<style>
+	:root { --bg:#0b0f14; --panel:#121821; --border:#232d3b; --text:#e6edf3; --dim:#8b98a9; --accent:#4f8cff; --green:#33c481; }
+	* { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+	.card { width:400px; max-width:calc(100vw - 40px); background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:28px; }
+	h1 { font-size:1.1rem; margin:0 0 14px 0; }
+	label { display:block; font-size:.82rem; color:var(--dim); margin:0 0 6px 0; }
+	input { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:8px; font-size:.9rem; }
+	button { width:100%; margin-top:16px; background:var(--accent); color:#fff; border:none; padding:11px; border-radius:8px; font-weight:600; cursor:pointer; }
+	.msg { margin-top:10px; font-size:.85rem; text-align:center; }
+</style></head>
+<body><div class="card">
+	<h1>Reprogrammer la prochaine sauvegarde</h1>
+	<label>Date et heure</label>
+	<input type="datetime-local" id="dt">
+	<button id="go">Programmer</button>
+	<div class="msg" id="msg"></div>
+</div>
+<script>
+function pad(n){return String(n).padStart(2,"0");}
+const now = new Date();
+document.getElementById("dt").min = now.getFullYear()+"-"+pad(now.getMonth()+1)+"-"+pad(now.getDate())+"T"+pad(now.getHours())+":"+pad(now.getMinutes());
+document.getElementById("dt").value = document.getElementById("dt").min;
+document.getElementById("go").addEventListener("click", async () => {
+	const v = document.getElementById("dt").value;
+	const msg = document.getElementById("msg");
+	if (!v) { msg.textContent = "Choisissez une date."; return; }
+	try {
+		const res = await fetch("/tray/reschedule", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({at: new Date(v).toISOString()}) });
+		if (!res.ok) throw new Error("échec");
+		msg.textContent = "Programmé. Vous pouvez fermer cette page.";
+	} catch (e) { msg.textContent = "Erreur, réessayez."; }
+});
+</script></body></html>`

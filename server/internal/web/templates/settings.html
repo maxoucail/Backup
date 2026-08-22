@@ -18,7 +18,11 @@
 				<div class="section-title">Stockage et politique par défaut</div>
 				<form id="settings-form">
 					<label>Chemin de stockage (NAS local)</label>
-					<input class="input mono" id="storage-root" required>
+					<div class="row">
+						<input class="input mono" id="storage-root" required style="flex:1;">
+						<button class="btn secondary small" type="button" id="test-storage-btn">Tester</button>
+					</div>
+					<div id="test-storage-result" style="margin-top:6px; font-size:.82rem;"></div>
 					<div class="muted" style="font-size:.8rem; margin-top:4px;">Changer ce chemin ne migre pas les données existantes.</div>
 
 					<label>Intervalle de sauvegarde par défaut (minutes)</label>
@@ -52,6 +56,10 @@
 					<div class="mono" id="enroll-host" style="margin-bottom:10px;"></div>
 					<div class="muted" style="font-size:.8rem;">Clé d'enrôlement (valable une seule fois)</div>
 					<div class="mono" id="enroll-token" style="word-break:break-all;"></div>
+					<div class="muted" style="font-size:.8rem; margin-top:10px;">
+						Envoyez à l'utilisateur : la clé ci-dessus, et le lien
+						<a id="enroll-download-link" target="_blank">/download</a> pour installer l'agent.
+					</div>
 				</div>
 
 				<div class="section-title" style="margin-top:24px;">Clés récentes</div>
@@ -60,6 +68,25 @@
 					<tbody id="keys-body"></tbody>
 				</table>
 			</div>
+		</div>
+
+		<div class="card" style="margin-bottom:16px;">
+			<div class="row between">
+				<div class="section-title" style="margin:0;">Installeurs téléchargeables</div>
+				<a class="btn secondary small" href="/download" target="_blank">Voir la page publique →</a>
+			</div>
+			<p class="muted" style="margin-top:0;">Déposez ici le <span class="mono">.exe</span> Windows et l'archive
+				<span class="mono">.tar.gz</span>/<span class="mono">.pkg</span> macOS : ils deviennent
+				immédiatement téléchargeables depuis <span class="mono">/download</span>, sans compte requis,
+				pour que chacun installe l'agent lui-même.</p>
+			<form id="upload-form" class="row">
+				<input class="input" type="file" id="upload-file" required style="flex:1;">
+				<button class="btn small" type="submit">Envoyer</button>
+			</form>
+			<table style="margin-top:14px;">
+				<thead><tr><th>Fichier</th><th>Taille</th><th></th></tr></thead>
+				<tbody id="downloads-body"></tbody>
+			</table>
 		</div>
 
 		<div class="card">
@@ -90,6 +117,27 @@ async function loadSettings() {
 	document.getElementById("event-max-rows").value = s.event_retention_max_rows;
 	window.__chunkSize = s.chunk_size_bytes;
 }
+
+document.getElementById("test-storage-btn").addEventListener("click", async () => {
+	const btn = document.getElementById("test-storage-btn");
+	const resultEl = document.getElementById("test-storage-result");
+	const path = document.getElementById("storage-root").value.trim();
+	if (!path) { toast("Renseignez d'abord un chemin.", "error"); return; }
+	btn.disabled = true;
+	resultEl.innerHTML = `<span class="badge running"><span class="dot"></span>Test en cours (6 s)…</span>`;
+	try {
+		const res = await api("POST", "/api/settings/test-storage", { path });
+		if (res.ok) {
+			resultEl.innerHTML = `<span class="badge success"><span class="dot"></span>Fonctionnel</span>`;
+		} else {
+			resultEl.innerHTML = `<span class="badge failed"><span class="dot"></span>Échec : ${res.error}</span>`;
+		}
+	} catch (err) {
+		resultEl.innerHTML = `<span class="badge failed"><span class="dot"></span>Échec : ${err.message}</span>`;
+	} finally {
+		btn.disabled = false;
+	}
+});
 
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
 	e.preventDefault();
@@ -127,6 +175,9 @@ document.getElementById("enroll-form").addEventListener("submit", async (e) => {
 		});
 		document.getElementById("enroll-host").textContent = res.server_host;
 		document.getElementById("enroll-token").textContent = res.token;
+		const downloadLink = document.getElementById("enroll-download-link");
+		downloadLink.href = `${window.location.protocol}//${res.server_host}/download`;
+		downloadLink.textContent = `${window.location.protocol}//${res.server_host}/download`;
 		document.getElementById("enroll-result").style.display = "block";
 		loadKeys();
 	} catch (err) {
@@ -149,8 +200,52 @@ document.getElementById("account-form").addEventListener("submit", async (e) => 
 	}
 });
 
+function downloadRow(f) {
+	return `<tr>
+		<td>${f.name} <span class="muted">(${f.label})</span></td>
+		<td class="muted">${fmtBytes(f.size)}</td>
+		<td><button class="btn danger small" onclick="deleteDownload('${f.name}')">Supprimer</button></td>
+	</tr>`;
+}
+
+async function loadDownloads() {
+	const files = await api("GET", "/api/downloads");
+	document.getElementById("downloads-body").innerHTML = (files || []).map(downloadRow).join("");
+}
+
+async function deleteDownload(name) {
+	if (!confirm(`Supprimer ${name} ?`)) return;
+	try {
+		await api("DELETE", `/api/downloads/${encodeURIComponent(name)}`);
+		loadDownloads();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+}
+
+document.getElementById("upload-form").addEventListener("submit", async (e) => {
+	e.preventDefault();
+	const input = document.getElementById("upload-file");
+	if (!input.files.length) return;
+	const formData = new FormData();
+	formData.append("file", input.files[0]);
+	try {
+		const res = await fetch("/api/downloads/upload", { method: "POST", body: formData, credentials: "same-origin" });
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			throw new Error(data.error || `erreur ${res.status}`);
+		}
+		input.value = "";
+		toast("Fichier envoyé.", "success");
+		loadDownloads();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
+
 loadSettings().catch(err => toast(err.message, "error"));
 loadKeys().catch(err => toast(err.message, "error"));
+loadDownloads().catch(err => toast(err.message, "error"));
 </script>
 </body>
 </html>

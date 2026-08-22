@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 var (
@@ -29,6 +31,31 @@ var (
 	procCreateProcessAsUserW         = advapi32.NewProc("CreateProcessAsUserW")
 	procGetUserProfileDirectoryW     = userenv.NewProc("GetUserProfileDirectoryW")
 )
+
+// ConsoleUserSID returns the SID (as its canonical S-1-5-... string form)
+// of whoever is logged into the console - used to read that user's own
+// registry hive (HKEY_USERS\<SID>\...) from a LocalSystem service, since
+// HKEY_CURRENT_USER inside the service process resolves to LocalSystem's
+// own hive, not the console user's. Built on golang.org/x/sys/windows'
+// own token/SID helpers rather than hand-rolled syscalls, since those
+// already handle the LocalAlloc'd string memory correctly.
+func ConsoleUserSID() (string, error) {
+	token, err := primaryToken()
+	if err != nil {
+		return "", err
+	}
+	defer syscall.CloseHandle(token)
+
+	tokenUser, err := windows.Token(token).GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("GetTokenUser: %w", err)
+	}
+	sid := tokenUser.User.Sid
+	if sid == nil {
+		return "", fmt.Errorf("jeton sans SID utilisateur")
+	}
+	return sid.String(), nil
+}
 
 const (
 	tokenImpersonation       = 2 // SecurityImpersonation

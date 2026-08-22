@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Télécharger l'agent — Backup Center</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="login-shell">
+	<div class="login-card" style="width:480px;">
+		<div class="brand" style="justify-content:center;">
+			<span class="dot"></span>Backup Center
+		</div>
+		<p class="muted" style="text-align:center; margin-top:-8px; margin-bottom:22px;">
+			Téléchargez l'agent, installez-le, puis renseignez l'adresse de ce serveur
+			et la clé d'enrôlement fournie par votre administrateur.
+		</p>
+		<div id="files"></div>
+		<div id="empty" class="empty-state" style="display:none;">
+			Aucun installeur n'est disponible pour le moment. Contactez votre administrateur.
+		</div>
+	</div>
+</div>
+<script src="/static/js/api.js"></script>
+<script>
+function row(f) {
+	return `<div class="card" style="margin-bottom:10px; display:flex; align-items:center; justify-content:space-between;">
+		<div>
+			<div style="font-weight:600;">${f.label}</div>
+			<div class="muted mono" style="font-size:.78rem;">${f.name} · ${fmtBytes(f.size)}</div>
+		</div>
+		<a class="btn small" href="/downloads/${encodeURIComponent(f.name)}">Télécharger</a>
+	</div>`;
+}
+(async () => {
+	try {
+		const files = await (await fetch("/api/downloads")).json();
+		document.getElementById("files").innerHTML = (files || []).map(row).join("");
+		document.getElementById("empty").style.display = (files || []).length ? "none" : "block";
+	} catch (e) {
+		document.getElementById("empty").style.display = "block";
+	}
+})();
+</script>
+</body>
+</html>

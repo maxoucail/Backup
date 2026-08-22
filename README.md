@@ -58,6 +58,25 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
   confirmation, y compris ressaisir le nom de l'appareil) ; l'agent reçoit
   l'ordre de se désinstaller et efface ses identifiants locaux. L'appareil
   peut être réenrôlé plus tard avec une nouvelle clé.
+- **Dossiers redirigés détectés automatiquement (Windows)** : si Bureau,
+  Documents, Téléchargements ou Images ont été déplacés vers un autre
+  disque (clic droit → Propriétés → Emplacement), l'agent lit le registre
+  pour sauvegarder le bon dossier plutôt que de supposer qu'il est resté
+  sous `C:\Users\...`. On peut aussi forcer des chemins précis par
+  appareil depuis le panneau, y compris sur un autre disque.
+- **Icône dans la barre des tâches (Windows)** : affiche la date de la
+  dernière sauvegarde et permet de sauvegarder maintenant ou de
+  reprogrammer la prochaine sauvegarde - sans jamais bloquer un
+  déclenchement fait depuis le serveur, qui reste toujours prioritaire.
+- **Page de téléchargement en libre-service** : l'administrateur dépose
+  l'installeur Windows et l'archive macOS une fois dans le panneau ; tout
+  le monde peut ensuite les récupérer sur `/download`, sans compte,
+  installer en un double-clic et ne saisir que l'adresse du serveur et une
+  clé.
+- **Test de connectivité du stockage** : avant de confirmer un chemin NAS,
+  le panneau y écrit un fichier témoin, attend 6 secondes, vérifie qu'il
+  est toujours lisible puis le supprime - un montage instable est détecté
+  avant que de vraies sauvegardes n'y échouent.
 
 Voir `docs/ARCHITECTURE.md` pour le détail du protocole et des choix de
 conception, et `docs/DEPLOYMENT.md` pour l'installation pas à pas.
@@ -81,11 +100,18 @@ premier démarrage (`journalctl -u backup-server`) et écrit dans
 
 ### Enrôler un appareil
 
-1. Dans le panneau, **Paramètres → Enrôler un nouvel appareil** : générez une clé.
-2. Installez l'agent sur le poste Windows ou macOS (voir ci-dessous).
-3. Au premier lancement, l'agent ouvre une page dans le navigateur par
-   défaut : renseignez l'adresse du serveur et la clé. L'appareil apparaît
-   alors dans le panneau et est administré à distance.
+1. Dans le panneau, **Paramètres → Installeurs téléchargeables** : déposez
+   une fois `BackupAgentSetup.exe` et l'archive macOS (récupérables sur les
+   releases GitHub ou compilés vous-même, voir plus bas).
+2. **Paramètres → Enrôler un nouvel appareil** : générez une clé. Le
+   panneau affiche alors le lien `/download` et la clé à transmettre à
+   l'utilisateur.
+3. Sur le poste à sauvegarder : ouvrez `/download`, téléchargez
+   l'installeur correspondant, double-cliquez. Au premier lancement,
+   l'agent ouvre une page dans le navigateur : renseignez l'adresse du
+   serveur et la clé - une confirmation de connexion s'affiche
+   immédiatement. L'appareil apparaît alors dans le panneau et est
+   administré à distance.
 
 ### Agent Windows
 
