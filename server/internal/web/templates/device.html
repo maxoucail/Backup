@@ -18,7 +18,7 @@
 			<div class="row">
 				<button class="btn secondary small" id="rename-btn">Renommer</button>
 				<button class="btn small" id="backup-now-btn">Sauvegarder maintenant</button>
-				<button class="btn danger small" id="delete-btn">Supprimer</button>
+				<button class="btn danger small" id="delete-btn">Décommissionner…</button>
 			</div>
 		</div>
 
@@ -63,6 +63,19 @@
 		<div class="row" style="justify-content:flex-end; margin-top:18px;">
 			<button class="btn secondary" id="restore-cancel">Annuler</button>
 			<button class="btn" id="restore-confirm">Restaurer</button>
+		</div>
+	</div>
+</div>
+
+<div class="modal-backdrop" id="decommission-modal" style="display:none;">
+	<div class="modal">
+		<h3>Décommissionner cet appareil</h3>
+		<p class="muted">Cette action est irréversible : l'agent reçoit l'ordre de se désinstaller (arrêt du service, suppression de ses identifiants locaux) et toutes ses sauvegardes sont supprimées du serveur. Vous pourrez réenrôler cette machine plus tard avec une nouvelle clé si besoin.</p>
+		<label>Tapez <strong id="decommission-name-hint"></strong> pour confirmer</label>
+		<input class="input" id="decommission-confirm-input" autocomplete="off">
+		<div class="row" style="justify-content:flex-end; margin-top:18px;">
+			<button class="btn secondary" id="decommission-cancel">Annuler</button>
+			<button class="btn danger" id="decommission-confirm" disabled>Décommissionner définitivement</button>
 		</div>
 	</div>
 </div>
@@ -126,11 +139,29 @@ document.getElementById("backup-now-btn").addEventListener("click", async () => 
 	}
 });
 
-document.getElementById("delete-btn").addEventListener("click", async () => {
-	if (!confirm("Supprimer définitivement cet appareil et toutes ses sauvegardes ?")) return;
+let currentDeviceName = "";
+
+document.getElementById("delete-btn").addEventListener("click", () => {
+	if (!confirm("Décommissionner définitivement cet appareil ? Cette action est irréversible.")) return;
+	document.getElementById("decommission-name-hint").textContent = currentDeviceName;
+	document.getElementById("decommission-confirm-input").value = "";
+	document.getElementById("decommission-confirm").disabled = true;
+	document.getElementById("decommission-modal").style.display = "flex";
+});
+document.getElementById("decommission-cancel").addEventListener("click", () => {
+	document.getElementById("decommission-modal").style.display = "none";
+});
+document.getElementById("decommission-confirm-input").addEventListener("input", (e) => {
+	document.getElementById("decommission-confirm").disabled = e.target.value !== currentDeviceName;
+});
+document.getElementById("decommission-confirm").addEventListener("click", async () => {
 	try {
-		await api("DELETE", `/api/devices/${deviceId}`);
-		window.location.href = "/devices";
+		const res = await api("POST", `/api/devices/${deviceId}/decommission`, {
+			confirm_name: document.getElementById("decommission-confirm-input").value,
+		});
+		document.getElementById("decommission-modal").style.display = "none";
+		toast(res.agent_notified ? "Appareil décommissionné : commande envoyée à l'agent." : "Appareil supprimé (agent hors ligne : il redemandera une configuration à sa prochaine tentative de connexion).", "success");
+		setTimeout(() => window.location.href = "/devices", 1200);
 	} catch (err) {
 		toast(err.message, "error");
 	}
@@ -169,6 +200,7 @@ async function load() {
 	try {
 		const data = await api("GET", `/api/devices/${deviceId}`);
 		const d = data.device;
+		currentDeviceName = d.name;
 		document.getElementById("device-name").textContent = d.name;
 		document.getElementById("device-sub").innerHTML =
 			`<span class="badge ${d.online ? 'online' : 'offline'}"><span class="dot"></span>${d.online ? 'en ligne' : 'hors ligne'}</span>

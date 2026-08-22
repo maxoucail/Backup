@@ -10,6 +10,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"backup-agent/internal/userctx"
 )
 
 var defaultFolderNames = []string{"Desktop", "Downloads", "Documents", "Pictures"}
@@ -18,7 +20,7 @@ var defaultFolderNames = []string{"Desktop", "Downloads", "Documents", "Pictures
 // Non-existent folders (e.g. a fresh account with no Pictures folder yet)
 // are silently skipped rather than treated as an error.
 func DefaultRoots() []string {
-	home, err := os.UserHomeDir()
+	home, err := userctx.HomeDir()
 	if err != nil {
 		return nil
 	}
@@ -40,7 +42,7 @@ func ResolveRoots(configured []string) []string {
 	if len(configured) == 0 {
 		return DefaultRoots()
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := userctx.HomeDir()
 	var roots []string
 	for _, p := range configured {
 		if filepath.IsAbs(p) {
@@ -64,7 +66,7 @@ type FileEntry struct {
 // logged and skipped rather than aborting the whole backup - a single
 // locked file should never fail an otherwise-successful run.
 func Walk(roots []string) []FileEntry {
-	home, _ := os.UserHomeDir()
+	home, _ := userctx.HomeDir()
 	seen := make(map[string]bool)
 	var out []FileEntry
 
@@ -112,6 +114,21 @@ func Walk(roots []string) []FileEntry {
 		})
 	}
 	return out
+}
+
+// CheckAccess returns the roots that exist but couldn't be listed due to a
+// permission error - on macOS running as a root LaunchDaemon, this is the
+// signature of a missing "Full Disk Access" grant (Desktop/Documents/
+// Downloads/Pictures are TCC-protected since Catalina, and no installer
+// can pre-grant that on the user's behalf).
+func CheckAccess(roots []string) []string {
+	var blocked []string
+	for _, root := range roots {
+		if _, err := os.ReadDir(root); err != nil && os.IsPermission(err) {
+			blocked = append(blocked, root)
+		}
+	}
+	return blocked
 }
 
 func isOutside(rel string) bool {

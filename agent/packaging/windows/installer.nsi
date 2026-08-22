@@ -1,11 +1,18 @@
 ; Backup Agent - installeur Windows (NSIS)
 ;
-; Installation par utilisateur (aucun droit administrateur requis) : le
-; binaire est copié dans %LOCALAPPDATA%\BackupAgent et une tâche planifiée
-; "au logon" est enregistrée pour l'utilisateur courant. C'est
-; volontairement un service *par utilisateur* et non un service Windows
-; système : seul un processus tournant dans la session interactive de
-; l'utilisateur peut afficher la popup de progression sur son écran.
+; Installation machine (droits administrateur requis) : le binaire est
+; copié dans Program Files et enregistré comme un vrai Service Windows
+; démarrant automatiquement au démarrage de la machine (avant toute
+; connexion utilisateur), avec redémarrage automatique en cas
+; d'incident. Seul un administrateur peut l'arrêter ou le désinstaller
+; (net stop / services.msc / cet installeur) - un utilisateur standard ne
+; le peut pas, ce qui est le mécanisme normal de Windows pour un service,
+; pas un artifice de dissimulation.
+;
+; Le service n'a pas de session graphique propre : pour afficher
+; l'assistant de configuration ou la popup de progression, l'agent lance
+; un petit processus dans la session de l'utilisateur connecté
+; (CreateProcessAsUser, voir internal/winsession).
 ;
 ; Compilation : makensis installer.nsi
 ; (le binaire backup-agent.exe cross-compilé doit être présent à côté de
@@ -17,8 +24,8 @@
 
 Name "${APP_NAME}"
 OutFile "BackupAgentSetup.exe"
-InstallDir "$LOCALAPPDATA\BackupAgent"
-RequestExecutionLevel user
+InstallDir "$PROGRAMFILES64\BackupAgent"
+RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
 Page directory
@@ -31,29 +38,30 @@ Section "Install"
 	File "${APP_EXE}"
 
 	CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-	CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
 	CreateShortcut "$SMPROGRAMS\${APP_NAME}\Désinstaller.lnk" "$INSTDIR\uninstall.exe"
 
 	WriteUninstaller "$INSTDIR\uninstall.exe"
-	WriteRegStr HKCU "Software\${COMPANY}\${APP_NAME}" "InstallDir" "$INSTDIR"
-	WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "DisplayName" "${APP_NAME}"
-	WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "UninstallString" "$INSTDIR\uninstall.exe"
-	WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "Publisher" "${COMPANY}"
+	WriteRegStr HKLM "Software\${COMPANY}\${APP_NAME}" "InstallDir" "$INSTDIR"
+	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "DisplayName" "${APP_NAME}"
+	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "UninstallString" "$INSTDIR\uninstall.exe"
+	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "Publisher" "${COMPANY}"
 
-	; The agent registers its own logon task and, on first run, opens the
-	; local enrollment wizard in the default browser - nothing else to
-	; configure here.
-	Exec '"$INSTDIR\${APP_EXE}"'
+	; Registers and starts the Windows Service. On first run (device not
+	; yet enrolled), the service itself opens the enrollment wizard in the
+	; installing user's session - nothing else to do here.
+	DetailPrint "Installation du service..."
+	nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" install'
 SectionEnd
 
 Section "Uninstall"
-	nsExec::Exec 'schtasks /Delete /TN "BackupAgent" /F'
+	DetailPrint "Arrêt et désinstallation du service..."
+	nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" uninstall'
+	Sleep 1000
 	Delete "$INSTDIR\${APP_EXE}"
 	Delete "$INSTDIR\uninstall.exe"
 	RMDir "$INSTDIR"
-	Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
 	Delete "$SMPROGRAMS\${APP_NAME}\Désinstaller.lnk"
 	RMDir "$SMPROGRAMS\${APP_NAME}"
-	DeleteRegKey HKCU "Software\${COMPANY}\${APP_NAME}"
-	DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent"
+	DeleteRegKey HKLM "Software\${COMPANY}\${APP_NAME}"
+	DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent"
 SectionEnd

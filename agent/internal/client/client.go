@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,13 @@ import (
 
 	"backup-agent/internal/protocol"
 )
+
+// ErrUnauthorized means the server rejected this device's credentials
+// outright (401) - not a transient network problem. In practice this
+// means an operator decommissioned/deleted this device from the panel;
+// the agent's enrollment is dead and it needs to re-run the setup wizard
+// rather than retry forever.
+var ErrUnauthorized = errors.New("appareil non reconnu par le serveur (décommissionné ?)")
 
 type Client struct {
 	ServerURL    string // e.g. http://192.168.1.10:8420
@@ -49,6 +57,9 @@ func doJSON(client *http.Client, req *http.Request, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return ErrUnauthorized
+	}
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("%s %s: %d %s", req.Method, req.URL.Path, resp.StatusCode, string(data))
@@ -189,6 +200,10 @@ func (c *Client) DownloadChunk(ctx context.Context, hash string) (io.ReadCloser,
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		return nil, ErrUnauthorized
 	}
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))

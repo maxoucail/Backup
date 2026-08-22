@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"backup-server/internal/models"
 	"backup-server/internal/storage"
@@ -111,18 +112,24 @@ func (a *API) handleUpdateDevice(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (a *API) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id string) {
-	snapshots, err := models.ListSnapshotsForDevice(a.DB, id, 100000)
-	if err != nil {
+	if err := a.deleteDeviceAndReclaim(id); err != nil {
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
+func (a *API) deleteDeviceAndReclaim(id string) error {
+	snapshots, err := models.ListSnapshotsForDevice(a.DB, id, 100000)
+	if err != nil {
+		return err
 	}
 	store := a.Store.Get()
 	for _, s := range snapshots {
 		_ = storage.DeleteManifest(s.ManifestPath)
 	}
 	if err := models.DeleteDevice(a.DB, id); err != nil {
-		writeError(w, http.StatusInternalServerError, "erreur serveur")
-		return
+		return err
 	}
 	go func() {
 		remaining, err := models.AllManifestPaths(a.DB)
@@ -130,7 +137,43 @@ func (a *API) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id stri
 			_, _, _ = store.GarbageCollect(remaining)
 		}
 	}()
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+	return nil
+}
+
+type decommissionRequest struct {
+	ConfirmName string `json:"confirm_name"`
+}
+
+// handleDecommissionDevice is the destructive, remote "turn this device
+// off for good" action: it tells the agent (if currently connected) to
+// unregister itself as a service/autostart entry and erase its local
+// credentials before this device's identity is deleted server-side, so a
+// machine that gets re-enrolled later starts from a clean slate. Requires
+// the operator to retype the device's exact name as a second, explicit
+// confirmation beyond the panel's own confirm dialog.
+func (a *API) handleDecommissionDevice(w http.ResponseWriter, r *http.Request, id string) {
+	device, err := models.GetDevice(a.DB, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "appareil introuvable")
+		return
+	}
+	var req decommissionRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "requête invalide")
+		return
+	}
+	if strings.TrimSpace(req.ConfirmName) != device.Name {
+		writeError(w, http.StatusBadRequest, "le nom saisi ne correspond pas à celui de l'appareil")
+		return
+	}
+
+	wasOnline := a.Hub.SendCommand(id, ws.Envelope{Type: ws.TypeUninstall})
+
+	if err := a.deleteDeviceAndReclaim(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "erreur serveur")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": "true", "agent_notified": wasOnline})
 }
 
 func (a *API) handleBackupNow(w http.ResponseWriter, r *http.Request, id string) {

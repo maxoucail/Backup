@@ -24,6 +24,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/devices/{id}", a.requireSession(a.withPathID(a.handleGetDevice)))
 	mux.HandleFunc("PATCH /api/devices/{id}", a.requireSession(a.withPathID(a.handleUpdateDevice)))
 	mux.HandleFunc("DELETE /api/devices/{id}", a.requireSession(a.withPathID(a.handleDeleteDevice)))
+	mux.HandleFunc("POST /api/devices/{id}/decommission", a.requireSession(a.withPathID(a.handleDecommissionDevice)))
 	mux.HandleFunc("POST /api/devices/{id}/backup-now", a.requireSession(a.withPathID(a.handleBackupNow)))
 	mux.HandleFunc("POST /api/devices/{id}/restore", a.requireSession(a.withPathID(a.handleRestore)))
 	mux.HandleFunc("POST /api/devices/{id}/cancel", a.requireSession(a.withPathID(a.handleCancelJob)))

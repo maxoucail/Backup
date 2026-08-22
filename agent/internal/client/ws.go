@@ -26,7 +26,10 @@ type WSClient struct {
 	HelloInfo    protocol.Envelope
 
 	Incoming chan protocol.Envelope
-	outgoing chan protocol.Envelope
+	// Unauthorized is signalled (non-blocking) when the server rejects this
+	// device's credentials outright - see client.ErrUnauthorized.
+	Unauthorized chan struct{}
+	outgoing     chan protocol.Envelope
 
 	connectedMu sync.RWMutex
 	connected   bool
@@ -39,6 +42,7 @@ func NewWSClient(serverURL, deviceID, deviceSecret string, hello protocol.Envelo
 		DeviceSecret: deviceSecret,
 		HelloInfo:    hello,
 		Incoming:     make(chan protocol.Envelope, 32),
+		Unauthorized: make(chan struct{}, 1),
 		outgoing:     make(chan protocol.Envelope, 128),
 	}
 }
@@ -115,8 +119,14 @@ func (w *WSClient) runOnce(ctx context.Context) error {
 	header.Set("X-Device-Secret", w.DeviceSecret)
 
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, target, header)
+	conn, resp, err := dialer.DialContext(ctx, target, header)
 	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			select {
+			case w.Unauthorized <- struct{}{}:
+			default:
+			}
+		}
 		return err
 	}
 	defer conn.Close()

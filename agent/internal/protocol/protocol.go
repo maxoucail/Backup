@@ -56,6 +56,7 @@ const (
 	TypeBackupNow       = "backup_now"
 	TypeRestore         = "restore"
 	TypeCancel          = "cancel"
+	TypeUninstall       = "uninstall"
 	TypeProgress        = "progress"
 	TypeLog             = "log"
 	TypeBackupStarted   = "backup_started"

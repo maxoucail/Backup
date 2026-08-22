@@ -23,7 +23,7 @@ VERSION="${1:-1.0.0}"
 AGENT_DIR="../.."
 ROOT="pkgroot"
 IDENTIFIER="com.backupcenter.agent"
-INSTALL_PATH="/usr/local/backup-agent"
+INSTALL_PATH="/Library/BackupAgent/bin"
 
 rm -rf "$ROOT" "*.pkg"
 mkdir -p "$ROOT$INSTALL_PATH"
@@ -39,17 +39,20 @@ if [ -n "${CODESIGN_IDENTITY:-}" ]; then
 fi
 
 mkdir -p scripts
-cat > scripts/postinstall <<'EOF'
+cat > scripts/preinstall <<EOF
 #!/bin/bash
-# Runs as the installing user via the installer's per-user context is not
-# guaranteed (pkg postinstall runs as root); launch the agent for the
-# logged-in console user so its LaunchAgent gets registered in their
-# session, not root's.
-CONSOLE_USER=$(stat -f%Su /dev/console)
-sudo -u "$CONSOLE_USER" /usr/local/backup-agent/backup-agent &
+# Best-effort: unregister a previous install before laying down new files.
+$INSTALL_PATH/backup-agent uninstall 2>/dev/null || true
 exit 0
 EOF
-chmod +x scripts/postinstall
+cat > scripts/postinstall <<EOF
+#!/bin/bash
+# pkg scripts always run as root, which is exactly what registering the
+# system LaunchDaemon needs - see internal/macdaemon.
+$INSTALL_PATH/backup-agent install
+exit 0
+EOF
+chmod +x scripts/preinstall scripts/postinstall
 
 echo "==> pkgbuild"
 pkgbuild --root "$ROOT" --identifier "$IDENTIFIER" --version "$VERSION" \

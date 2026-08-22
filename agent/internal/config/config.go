@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type Config struct {
@@ -18,6 +19,18 @@ type Config struct {
 	IntervalMinutes int      `json:"interval_minutes"`
 	RetentionCount  int      `json:"retention_count"`
 	BackupPaths     []string `json:"backup_paths,omitempty"`
+
+	// NextScheduledAt is when the next routine scheduled backup is due.
+	// Compared against the current time at startup to detect a backup that
+	// was missed because the machine was off - see the reschedule wizard.
+	NextScheduledAt *time.Time `json:"next_scheduled_at,omitempty"`
+	// PendingCatchUpAt is a one-off makeup time the user picked after a
+	// missed backup was detected. Cleared once that catch-up run happens.
+	PendingCatchUpAt *time.Time `json:"pending_catch_up_at,omitempty"`
+	// CatchUpNotifiedT15/T5 track whether the T-15min/T-5min heads-up for
+	// PendingCatchUpAt has already fired, so a restart doesn't repeat them.
+	CatchUpNotifiedT15 bool `json:"catch_up_notified_t15,omitempty"`
+	CatchUpNotifiedT5  bool `json:"catch_up_notified_t5,omitempty"`
 }
 
 func (c *Config) Enrolled() bool {
@@ -83,6 +96,23 @@ func Save(c *Config) error {
 		return err
 	}
 	return os.Rename(tmp, p)
+}
+
+// Clear wipes the local device identity (config + cached manifest) so the
+// agent starts fresh through the setup wizard on next use - used when the
+// server reports this device is no longer recognized (decommissioned).
+func Clear() error {
+	p, err := path()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if mp, err := ManifestCachePath(); err == nil {
+		_ = os.Remove(mp)
+	}
+	return nil
 }
 
 // ManifestCachePath is where the agent keeps a local copy of the last

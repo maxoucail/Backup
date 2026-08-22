@@ -12,6 +12,14 @@ import (
 	"runtime"
 )
 
+// ShowURL opens url where the user can actually see it. It defaults to
+// OpenBrowser (fine for a normal per-user process, which already runs in
+// the interactive session). When the agent runs as a system service
+// (Windows Service / macOS LaunchDaemon, started before anyone logs in),
+// main() replaces this with a session-crossing launcher - a service has no
+// desktop of its own to open a browser on.
+var ShowURL = OpenBrowser
+
 // OpenBrowser opens url in the user's default browser.
 func OpenBrowser(url string) error {
 	switch runtime.GOOS {

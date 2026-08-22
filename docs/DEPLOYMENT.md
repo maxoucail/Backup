@@ -56,16 +56,21 @@ accessibles.
 ### Installer
 
 Téléchargez `BackupAgentSetup.exe` (release GitHub, ou compilé vous-même
-avec `agent/packaging/windows/build.sh`) et lancez-le. Aucun droit
-administrateur n'est nécessaire : l'installation est faite par utilisateur
-(`%LOCALAPPDATA%\BackupAgent`), avec une tâche planifiée « à la connexion »
-enregistrée automatiquement pour l'utilisateur courant - c'est ce qui
-permet à l'agent d'afficher la popup de progression dans la session
-interactive (un service Windows système ne le peut pas).
+avec `agent/packaging/windows/build.sh`) et lancez-le **en administrateur**
+(l'installeur le demande via l'élévation UAC). Il installe le binaire dans
+`Program Files\BackupAgent` et l'enregistre comme un vrai **Service
+Windows** (`BackupAgent`, démarrage automatique, LocalSystem) avec des
+actions de récupération configurées (`sc.exe failure`) pour qu'il redémarre
+seul après un incident. Un utilisateur standard ne peut pas l'arrêter -
+seul un administrateur le peut, via `services.msc`, `net stop
+BackupAgent`, ou en désinstallant.
 
-Au premier lancement, une page s'ouvre dans le navigateur par défaut :
-renseignez l'adresse du serveur et la clé d'enrôlement générée depuis le
-panneau.
+Le service n'ayant pas de session graphique propre, il lance un petit
+processus dans la session de l'utilisateur connecté (voir
+`docs/ARCHITECTURE.md`) pour afficher l'assistant de configuration au
+premier démarrage et les popups de progression ensuite. Au premier
+lancement, une page s'ouvre donc dans le navigateur par défaut : renseignez
+l'adresse du serveur et la clé d'enrôlement générée depuis le panneau.
 
 ### Compiler soi-même
 
@@ -74,24 +79,49 @@ cd agent/packaging/windows
 ./build.sh 1.0.0        # cross-compile + empaquette avec NSIS (apt install nsis)
 ```
 
+### Installer/désinstaller manuellement (sans passer par l'installeur)
+
+```powershell
+backup-agent.exe install     # enregistre et démarre le service (admin requis)
+backup-agent.exe uninstall   # arrête et désenregistre le service (admin requis)
+```
+
 ### Désinstaller
 
 Panneau de configuration Windows → Applications → *Backup Agent*, ou le
-raccourci *Désinstaller* du menu Démarrer.
+raccourci *Désinstaller* du menu Démarrer. Dans les deux cas, ceci arrête
+et désenregistre proprement le service avant de retirer les fichiers.
 
 ## Agent macOS
 
 ### Installer
 
 Téléchargez et décompressez `BackupAgent-macOS-*.tar.gz`, puis
-double-cliquez sur `install.command`. Le script détecte automatiquement
-Intel vs Apple Silicon, copie le binaire dans
-`~/Library/Application Support/BackupAgent`, lève l'attribut de
-quarantaine (nécessaire car le binaire n'est pas signé par défaut) et
-enregistre un *LaunchAgent* pour démarrer l'agent à chaque connexion.
+double-cliquez sur `install.command` (demande le mot de passe administrateur
+via `sudo`). Le script détecte automatiquement Intel vs Apple Silicon, copie
+le binaire dans `/Library/BackupAgent/bin`, lève l'attribut de quarantaine
+(nécessaire car le binaire n'est pas signé par défaut) et l'enregistre comme
+un **LaunchDaemon système** démarrant au boot, avant toute connexion, et
+redémarré automatiquement s'il s'arrête de façon inattendue (`KeepAlive`).
+Seul un administrateur peut l'arrêter.
 
 Comme pour Windows, la première exécution ouvre une page dans le
-navigateur pour saisir l'adresse du serveur et la clé d'enrôlement.
+navigateur (via `launchctl asuser`, voir `docs/ARCHITECTURE.md`) pour
+saisir l'adresse du serveur et la clé d'enrôlement.
+
+**Étape manuelle obligatoire** : macOS protège Bureau/Documents/
+Téléchargements/Images derrière TCC, même pour un daemon root. Ouvrez
+*Réglages Système → Confidentialité et sécurité → Accès complet au disque*
+et autorisez `backup-agent` - sinon ces dossiers ne seront pas lisibles.
+L'agent détecte le blocage et envoie une notification de rappel plutôt que
+d'échouer silencieusement.
+
+### Installer/désinstaller manuellement (sans passer par install.command)
+
+```bash
+sudo /Library/BackupAgent/bin/backup-agent install     # enregistre et démarre le daemon
+sudo /Library/BackupAgent/bin/backup-agent uninstall   # arrête et désenregistre le daemon
+```
 
 ### Signer et notariser (optionnel, recommandé pour une distribution large)
 
@@ -125,8 +155,8 @@ Double-cliquez sur `uninstall.command` (présent à côté de `install.command`
 dans l'archive téléchargée), ou manuellement :
 
 ```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.backupcenter.agent.plist
-rm -rf ~/Library/Application\ Support/BackupAgent ~/Library/LaunchAgents/com.backupcenter.agent.plist
+sudo /Library/BackupAgent/bin/backup-agent uninstall
+sudo rm -rf /Library/BackupAgent
 ```
 
 ## CI/CD

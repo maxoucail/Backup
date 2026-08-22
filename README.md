@@ -44,6 +44,20 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
   (« Sauvegarder maintenant », « Restaurer ») ouvre sur l'écran de
   l'appareil une page locale avec barre de progression et temps restant.
   Les sauvegardes planifiées, elles, tournent silencieusement en arrière-plan.
+- **Service système, pas une appli qu'on ferme** : l'agent s'installe comme
+  un vrai service (Service Windows / LaunchDaemon macOS), démarre dès
+  l'écran de connexion et ne peut être arrêté que par un administrateur -
+  exactement comme n'importe quel agent de sauvegarde professionnel.
+- **Sauvegarde manquée = on vous demande, pas on ignore** : si le poste
+  était éteint à l'heure prévue, l'agent le détecte au redémarrage et
+  propose de reprogrammer la sauvegarde manquée à une heure précise
+  (aujourd'hui ou un autre jour), avec un rappel 15 min avant et un compte
+  à rebours affiché 5 min avant le lancement automatique.
+- **Décommissionnement à distance** : depuis la fiche d'un appareil, un
+  administrateur peut le décommissionner définitivement (double
+  confirmation, y compris ressaisir le nom de l'appareil) ; l'agent reçoit
+  l'ordre de se désinstaller et efface ses identifiants locaux. L'appareil
+  peut être réenrôlé plus tard avec une nouvelle clé.
 
 Voir `docs/ARCHITECTURE.md` pour le détail du protocole et des choix de
 conception, et `docs/DEPLOYMENT.md` pour l'installation pas à pas.
@@ -76,16 +90,21 @@ premier démarrage (`journalctl -u backup-server`) et écrit dans
 ### Agent Windows
 
 Téléchargez `BackupAgentSetup.exe` (généré par la CI, ou compilé localement
-avec `agent/packaging/windows/build.sh`) et exécutez-le. Installation par
-utilisateur, aucun droit administrateur requis.
+avec `agent/packaging/windows/build.sh`) et exécutez-le **en administrateur**
+(l'installeur le demande). Il enregistre un vrai Service Windows qui démarre
+au boot et se relance seul en cas d'incident.
 
 ### Agent macOS
 
 Téléchargez et décompressez `BackupAgent-macOS-*.tar.gz`, puis double-cliquez
-sur `install.command`. Le binaire n'étant pas signé par défaut, macOS peut
-demander confirmation la première fois (voir `docs/DEPLOYMENT.md` pour
-signer/notariser via `pkgbuild.sh` si vous disposez d'un certificat Apple
-Developer).
+sur `install.command` (mot de passe administrateur demandé via `sudo`). Il
+enregistre un LaunchDaemon système. **Important** : macOS protège Bureau/
+Documents/Téléchargements/Images (TCC) - autorisez « backup-agent » dans
+Réglages Système → Confidentialité et sécurité → Accès complet au disque,
+sinon ces dossiers ne pourront pas être lus (l'agent vous le signale par une
+notification). Le binaire n'étant pas signé par défaut, voir
+`docs/DEPLOYMENT.md` pour signer/notarier via `pkgbuild.sh` si vous disposez
+d'un certificat Apple Developer.
 
 ## Compiler soi-même
 

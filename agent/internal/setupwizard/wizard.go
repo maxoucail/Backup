@@ -94,7 +94,7 @@ func Run(ctx context.Context, agentVersion string) (*config.Config, error) {
 
 	url := "http://" + addr.String() + "/"
 	log.Printf("assistant de configuration disponible sur %s", url)
-	_ = osui.OpenBrowser(url)
+	_ = osui.ShowURL(url)
 	osui.Notify("Configuration requise", "Ouvrez "+url+" pour connecter cet appareil à votre serveur de sauvegarde.")
 
 	select {

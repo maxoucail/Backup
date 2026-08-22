@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sauvegarde manquée — Backup Agent</title>
+<style>
+	:root { --bg:#0b0f14; --panel:#121821; --border:#232d3b; --text:#e6edf3; --dim:#8b98a9; --accent:#4f8cff; --red:#e0555f; --green:#33c481; }
+	* { box-sizing:border-box; }
+	body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+		min-height:100vh; display:flex; align-items:center; justify-content:center; }
+	.card { width:440px; max-width:calc(100vw - 40px); background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:32px; }
+	h1 { font-size:1.15rem; margin:0 0 4px 0; display:flex; align-items:center; gap:8px; }
+	.dot { width:10px; height:10px; border-radius:50%; background:var(--red); box-shadow:0 0 8px var(--red); flex:none; }
+	p.sub { color:var(--dim); font-size:.88rem; margin:8px 0 22px 0; line-height:1.5; }
+	.quick { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+	.quick button { background:var(--bg); border:1px solid var(--border); color:var(--text); padding:7px 12px; border-radius:999px; font-size:.8rem; cursor:pointer; }
+	.quick button:hover { border-color:var(--accent); }
+	label { display:block; font-size:.82rem; color:var(--dim); margin:0 0 6px 0; }
+	input[type=datetime-local] { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:8px; font-size:.9rem; }
+	button.submit { width:100%; margin-top:20px; background:var(--accent); color:#fff; border:none; padding:11px; border-radius:8px; font-weight:600; cursor:pointer; font-size:.92rem; }
+	button.skip { width:100%; margin-top:8px; background:transparent; color:var(--dim); border:none; padding:8px; cursor:pointer; font-size:.82rem; text-decoration:underline; }
+	.msg { margin-top:12px; font-size:.85rem; min-height:1.2em; color:var(--red); }
+	.done { text-align:center; }
+</style>
+</head>
+<body>
+<div class="card">
+	<div id="form-view">
+		<h1><span class="dot"></span>Sauvegarde manquée</h1>
+		<p class="sub">Votre dernière sauvegarde planifiée n'a pas pu être effectuée (l'ordinateur était probablement éteint ou en veille). Choisissez un nouveau créneau : votre ordinateur devra rester allumé à ce moment-là.</p>
+		<div class="quick">
+			<button type="button" data-min="30">Dans 30 min</button>
+			<button type="button" data-min="120">Dans 2 h</button>
+			<button type="button" data-tonight="20">Ce soir 20h</button>
+			<button type="button" data-tomorrow="9">Demain 9h</button>
+		</div>
+		<label>Ou choisissez une date et une heure précises</label>
+		<input type="datetime-local" id="dt">
+		<button class="submit" id="submit-btn">Programmer cette sauvegarde</button>
+		<button class="skip" id="skip-btn">Ne pas reprogrammer (attendre le prochain cycle normal)</button>
+		<div class="msg" id="msg"></div>
+	</div>
+	<div id="done-view" style="display:none;" class="done">
+		<h1 style="justify-content:center;"><span class="dot" style="background:var(--green); box-shadow:0 0 8px var(--green);"></span>Sauvegarde programmée</h1>
+		<p class="sub" id="done-text"></p>
+	</div>
+</div>
+<script>
+function pad(n) { return String(n).padStart(2, "0"); }
+function toLocalInputValue(d) {
+	return d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+const dt = document.getElementById("dt");
+const now = new Date();
+dt.min = toLocalInputValue(new Date(now.getTime() + 60000));
+dt.value = toLocalInputValue(new Date(now.getTime() + 15*60000));
+
+document.querySelectorAll(".quick button").forEach(btn => {
+	btn.addEventListener("click", () => {
+		const d = new Date();
+		if (btn.dataset.min) {
+			d.setTime(d.getTime() + parseInt(btn.dataset.min, 10) * 60000);
+		} else if (btn.dataset.tonight) {
+			d.setHours(parseInt(btn.dataset.tonight, 10), 0, 0, 0);
+			if (d < now) d.setDate(d.getDate() + 1);
+		} else if (btn.dataset.tomorrow) {
+			d.setDate(d.getDate() + 1);
+			d.setHours(parseInt(btn.dataset.tomorrow, 10), 0, 0, 0);
+		}
+		dt.value = toLocalInputValue(d);
+	});
+});
+
+async function submit(skip) {
+	const msg = document.getElementById("msg");
+	let iso = null;
+	if (!skip) {
+		if (!dt.value) { msg.textContent = "Choisissez une date."; return; }
+		iso = new Date(dt.value).toISOString();
+	}
+	try {
+		const res = await fetch("/submit", {
+			method: "POST", headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ scheduled_at: iso, skip: skip }),
+		});
+		const data = await res.json();
+		if (!res.ok) throw new Error(data.error || "erreur");
+		document.getElementById("form-view").style.display = "none";
+		document.getElementById("done-view").style.display = "block";
+		document.getElementById("done-text").textContent = skip
+			? "La sauvegarde reprendra à son prochain horaire habituel. Vous pouvez fermer cette page."
+			: "Assurez-vous que votre ordinateur soit allumé à l'heure choisie. Vous pouvez fermer cette page.";
+	} catch (err) {
+		msg.textContent = err.message;
+	}
+}
+document.getElementById("submit-btn").addEventListener("click", () => submit(false));
+document.getElementById("skip-btn").addEventListener("click", () => submit(true));
+</script>
+</body>
+</html>

@@ -51,6 +51,7 @@ const (
 	TypeBackupNow       = "backup_now"       // server -> agent, manual trigger
 	TypeRestore         = "restore"          // server -> agent, manual trigger
 	TypeCancel          = "cancel"           // server -> agent, abort running job
+	TypeUninstall       = "uninstall"        // server -> agent, decommission and self-remove
 	TypeProgress        = "progress"         // agent -> server
 	TypeLog             = "log"              // agent -> server
 	TypeBackupStarted   = "backup_started"   // agent -> server

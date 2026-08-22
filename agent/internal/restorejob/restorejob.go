@@ -15,6 +15,7 @@ import (
 
 	"backup-agent/internal/client"
 	"backup-agent/internal/protocol"
+	"backup-agent/internal/userctx"
 )
 
 const restoreConcurrency = 4
@@ -46,7 +47,7 @@ func Run(ctx context.Context, c *client.Client, snapshotID string, onProgress Pr
 	if err != nil {
 		return nil, fmt.Errorf("récupération du manifeste: %w", err)
 	}
-	home, err := os.UserHomeDir()
+	home, err := userctx.HomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("répertoire utilisateur introuvable: %w", err)
 	}

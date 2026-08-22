@@ -23,13 +23,14 @@ import (
 var popupHTML []byte
 
 type State struct {
-	Title       string  `json:"title"`
-	Phase       string  `json:"phase"`
-	Percent     float64 `json:"percent"`
-	EtaSeconds  int64   `json:"eta_seconds"`
-	DetailBytes int64   `json:"detail_bytes"`
-	Done        bool    `json:"done"`
-	Error       string  `json:"error,omitempty"`
+	Title           string  `json:"title"`
+	Phase           string  `json:"phase"`
+	Percent         float64 `json:"percent"`
+	EtaSeconds      int64   `json:"eta_seconds"`
+	DetailBytes     int64   `json:"detail_bytes"`
+	ScheduledAtUnix int64   `json:"scheduled_at_unix,omitempty"`
+	Done            bool    `json:"done"`
+	Error           string  `json:"error,omitempty"`
 }
 
 type Popup struct {
@@ -66,7 +67,7 @@ func Show(title string) (*Popup, error) {
 
 	url := "http://" + ln.Addr().String() + "/"
 	log.Printf("popup de progression disponible sur %s", url)
-	_ = osui.OpenBrowser(url)
+	_ = osui.ShowURL(url)
 	osui.Notify(title, "Suivez la progression : "+url)
 
 	return p, nil
@@ -78,6 +79,19 @@ func (p *Popup) Update(phase string, percent float64, etaSeconds, detailBytes in
 	p.state.Percent = percent
 	p.state.EtaSeconds = etaSeconds
 	p.state.DetailBytes = detailBytes
+	p.state.ScheduledAtUnix = 0
+	p.mu.Unlock()
+}
+
+// SetWaiting puts the popup into a live countdown display until target,
+// used for the 5-minute-before heads-up on a rescheduled catch-up backup.
+// The countdown itself ticks client-side in the browser; the agent just
+// needs to call Update with the first real progress phase once the job
+// actually starts to replace this view.
+func (p *Popup) SetWaiting(target time.Time) {
+	p.mu.Lock()
+	p.state.Phase = "waiting"
+	p.state.ScheduledAtUnix = target.Unix()
 	p.mu.Unlock()
 }
 
