@@ -108,6 +108,25 @@ func releaseStaleBackups(db *sql.DB, q *queue.Manager) {
 	}
 }
 
+// unconfirmedBackupAfter is how long a device gets to act on its turn once
+// the queue hands it one, before that turn is given up as wasted. This is
+// deliberately far shorter than staleBackupAfter: that timeout protects a
+// backup that is genuinely running for hours, while this one catches a
+// device that was simply never going to respond to begin with (asleep, or
+// stuck) - there's nothing to wait hours for.
+const unconfirmedBackupAfter = 3 * time.Minute
+
+// releaseUnconfirmedBackups reclaims turns that were handed to a device but
+// never acted on. Unlike releaseStaleBackups, there is no snapshot row to
+// close out here: an unconfirmed device never got as far as creating one.
+func releaseUnconfirmedBackups(db *sql.DB, q *queue.Manager) {
+	for _, deviceID := range q.ReleaseUnconfirmed(unconfirmedBackupAfter) {
+		log.Printf("file d'attente: tour de l'appareil %s non exploité, créneau réattribué", deviceID)
+		_ = models.AddEvent(db, &deviceID, models.EventLevelWarning,
+			"Le tour de cette machine dans la file d'attente est arrivé mais elle n'a pas démarré de sauvegarde : créneau réattribué à la suivante.")
+	}
+}
+
 // Run blocks, performing periodic maintenance until ctx is cancelled.
 func Run(ctx context.Context, db *sql.DB, store *storage.Holder, q *queue.Manager) {
 	ticker := time.NewTicker(1 * time.Minute)
@@ -130,6 +149,7 @@ func Run(ctx context.Context, db *sql.DB, store *storage.Holder, q *queue.Manage
 			}
 
 			releaseStaleBackups(db, q)
+			releaseUnconfirmedBackups(db, q)
 
 			if n, err := models.PurgeExpiredEnrollmentKeys(db); err != nil {
 				log.Printf("scheduler: purge enrollment keys: %v", err)
