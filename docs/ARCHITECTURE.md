@@ -60,6 +60,39 @@ Cette conception rend l'incrémental **gratuit** : un fichier identique
 resterait toujours le même hash, donc jamais réuploadé - y compris s'il
 existe déjà sur le serveur via un autre appareil.
 
+## File d'attente des sauvegardes
+
+`server/internal/queue` sérialise les sauvegardes à l'échelle de la flotte.
+Le serveur est le seul à savoir ce que fait chaque machine : c'est donc lui
+qui arbitre, pas les agents entre eux. Un agent demande un créneau au
+moment de créer sa sauvegarde ; si la limite (`max_concurrent_backups`,
+réglable depuis le panneau, 1 par défaut) est atteinte, il est mis en file
+FIFO et reçoit une réponse « en attente » — **volontairement pas une
+erreur** : aucun snapshot n'est créé, donc une machine qui patiente ne
+laisse aucune sauvegarde en échec derrière elle. Dès qu'un créneau se
+libère, le serveur envoie un `backup_now` au suivant.
+
+Trois cas dégradés sont traités explicitement, parce que chacun bloquerait
+sinon toute la flotte :
+
+- **Machine hors ligne au moment de son tour** : le créneau lui est
+  repris et proposé au suivant, au lieu d'être gaspillé.
+- **Machine qui disparaît en pleine sauvegarde** : la déconnexion du
+  WebSocket libère son créneau (`Hub.OnDisconnect`). Attention au cas
+  d'une simple reconnexion : l'ancienne connexion se ferme *après* que la
+  nouvelle soit enregistrée, donc seule la fermeture de la connexion
+  *courante* compte — sinon on libérerait le créneau d'une machine encore
+  en train de sauvegarder.
+- **Coupure de courant** (ni fin, ni déconnexion propre) : un balayage
+  périodique libère les créneaux détenus depuis plus de 12 h et clôture
+  les snapshots restés « en cours ».
+
+Côté agent, attendre est normal et généralement court. Mais si le tour ne
+vient pas au bout de 90 minutes, l'agent considère que la sauvegarde
+n'aura pas lieu et propose un créneau à l'utilisateur via le même
+assistant que pour une sauvegarde manquée — plutôt que de sauter
+silencieusement le cycle.
+
 ## Rétention et purge
 
 `server/internal/scheduler` fait tourner, en tâche de fond :

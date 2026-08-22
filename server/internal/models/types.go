@@ -21,6 +21,11 @@ type Settings struct {
 	EventRetentionDays     int    `json:"event_retention_days"`
 	EventRetentionMaxRows  int    `json:"event_retention_max_rows"`
 	ChunkSizeBytes         int64  `json:"chunk_size_bytes"`
+	// MaxConcurrentBackups caps how many devices may back up at the same
+	// time; the rest queue and are dispatched as slots free up. Default 1,
+	// so a single device saturating the NAS or the network link doesn't
+	// slow every other machine's backup down.
+	MaxConcurrentBackups int `json:"max_concurrent_backups"`
 }
 
 type EnrollmentKey struct {

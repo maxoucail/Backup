@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -61,12 +62,25 @@ func (a *API) handleAgentCreateSnapshot(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "type de sauvegarde invalide")
 		return
 	}
+
+	// Backups are serialized across the fleet (see internal/queue): the
+	// agent doesn't get a snapshot to write into until a slot is free.
+	// Being queued is a normal outcome, not an error - no snapshot row is
+	// created, so a waiting device leaves no failed backup behind.
+	if granted, position := a.Queue.Acquire(deviceID); !granted {
+		_ = models.AddEvent(a.DB, &deviceID, models.EventLevelInfo,
+			fmt.Sprintf("Sauvegarde mise en file d'attente (position %d) : une autre machine sauvegarde déjà.", position))
+		writeJSON(w, http.StatusOK, map[string]any{"queued": true, "position": position})
+		return
+	}
+
 	snap, err := models.CreateSnapshot(a.DB, deviceID, req.Kind)
 	if err != nil {
+		a.Queue.Release(deviceID) // don't strand the slot on a failed insert
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"snapshot_id": snap.ID})
+	writeJSON(w, http.StatusCreated, map[string]any{"queued": false, "snapshot_id": snap.ID})
 }
 
 type checkChunksRequest struct {
@@ -225,9 +239,14 @@ func (a *API) handleAgentFinishSnapshot(w http.ResponseWriter, r *http.Request, 
 
 	_, _ = a.DB.Exec(`UPDATE snapshots SET uploaded_bytes = ? WHERE id = ?`, req.UploadedBytes, snapshotID)
 	if err := models.FinishSnapshot(a.DB, snapshotID, req.Status, req.ErrorMessage, snap.ManifestPath); err != nil {
+		a.Queue.Release(deviceID) // slot must not outlive the backup, even on a failed write
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
 	}
+
+	// Whatever the outcome, this device is done occupying its slot: hand
+	// it to whoever is waiting.
+	a.Queue.Release(deviceID)
 
 	level := models.EventLevelInfo
 	msg := "Sauvegarde terminée avec succès."

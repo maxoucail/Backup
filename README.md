@@ -48,11 +48,20 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
   un vrai service (Service Windows / LaunchDaemon macOS), démarre dès
   l'écran de connexion et ne peut être arrêté que par un administrateur -
   exactement comme n'importe quel agent de sauvegarde professionnel.
+- **File d'attente entre machines** : par défaut une seule machine
+  sauvegarde à la fois (réglable dans **Paramètres → Sauvegardes
+  simultanées maximum**). Les autres attendent leur tour et démarrent
+  automatiquement dès qu'un créneau se libère — sans échec ni sauvegarde
+  fantôme. Une machine hors ligne au moment de son tour est sautée, et un
+  poste qui disparaît en pleine sauvegarde libère son créneau plutôt que
+  de bloquer toute la flotte.
 - **Sauvegarde manquée = on vous demande, pas on ignore** : si le poste
   était éteint à l'heure prévue, l'agent le détecte au redémarrage et
   propose de reprogrammer la sauvegarde manquée à une heure précise
   (aujourd'hui ou un autre jour), avec un rappel 15 min avant et un compte
-  à rebours affiché 5 min avant le lancement automatique.
+  à rebours affiché 5 min avant le lancement automatique. Même proposition
+  si une sauvegarde planifiée échoue, ou si le tour de la machine dans la
+  file d'attente n'est jamais venu.
 - **Décommissionnement à distance** : depuis la fiche d'un appareil, un
   administrateur peut le décommissionner définitivement (double
   confirmation, y compris ressaisir le nom de l'appareil) ; l'agent reçoit

@@ -53,6 +53,12 @@ type Hub struct {
 
 	mu    sync.RWMutex
 	conns map[string]*agentConn
+
+	// OnDisconnect, when set, is called after a device's connection is
+	// torn down. The queue uses it to reclaim the backup slot of a machine
+	// that vanished mid-backup, which would otherwise hold the whole fleet
+	// up until the stale sweep noticed.
+	OnDisconnect func(deviceID string)
 }
 
 func NewHub(db *sql.DB) *Hub {
@@ -118,14 +124,29 @@ func (h *Hub) ServeAgent(w http.ResponseWriter, r *http.Request, deviceID, remot
 	go h.writePump(ac, done)
 	h.readPump(ac, done)
 
+	// This teardown may be a connection that has already been superseded by
+	// a reconnect (the replaced one only unwinds after the new one is
+	// registered). In that case the device is very much still online and
+	// possibly mid-backup: recording it offline would flip the panel to a
+	// wrong state, and releasing its queue slot would let a second machine
+	// start alongside it. Only the current connection's teardown counts.
 	h.mu.Lock()
-	if h.conns[deviceID] == ac {
+	current := h.conns[deviceID] == ac
+	if current {
 		delete(h.conns, deviceID)
 	}
 	h.mu.Unlock()
 
+	if !current {
+		return
+	}
+
 	_ = models.SetDeviceStatus(h.db, deviceID, "offline")
 	_ = models.AddEvent(h.db, &deviceID, models.EventLevelInfo, "Agent déconnecté.")
+
+	if h.OnDisconnect != nil {
+		h.OnDisconnect(deviceID)
+	}
 }
 
 func (h *Hub) readPump(ac *agentConn, done chan struct{}) {

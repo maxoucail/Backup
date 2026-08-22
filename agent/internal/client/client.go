@@ -113,6 +113,23 @@ func (c *Client) GetConfig(ctx context.Context) (*PolicyResponse, error) {
 	return &out, nil
 }
 
+// ErrQueued means the server accepted the request but there's no free
+// backup slot: another machine is backing up. The agent must wait for the
+// server to call it back rather than starting anyway - see internal/queue
+// on the server side. It is deliberately not an error condition for the
+// user; nothing failed.
+var ErrQueued = errors.New("sauvegarde mise en file d'attente par le serveur")
+
+// QueuePosition carries how many devices are ahead, for logging.
+type QueuedError struct {
+	Position int
+}
+
+func (e *QueuedError) Error() string {
+	return fmt.Sprintf("%s (position %d)", ErrQueued.Error(), e.Position)
+}
+func (e *QueuedError) Is(target error) bool { return target == ErrQueued }
+
 func (c *Client) CreateSnapshot(ctx context.Context, kind string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"kind": kind})
 	req, err := c.authRequest(ctx, http.MethodPost, "/api/agent/snapshots", bytes.NewReader(body))
@@ -121,10 +138,15 @@ func (c *Client) CreateSnapshot(ctx context.Context, kind string) (string, error
 	}
 	var out struct {
 		SnapshotID string `json:"snapshot_id"`
+		Queued     bool   `json:"queued"`
+		Position   int    `json:"position"`
 	}
 	client := &http.Client{Timeout: 20 * time.Second}
 	if err := doJSON(client, req, &out); err != nil {
 		return "", err
+	}
+	if out.Queued {
+		return "", &QueuedError{Position: out.Position}
 	}
 	return out.SnapshotID, nil
 }

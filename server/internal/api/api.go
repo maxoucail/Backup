@@ -14,6 +14,7 @@ import (
 	"net/http"
 
 	"backup-server/internal/auth"
+	"backup-server/internal/queue"
 	"backup-server/internal/storage"
 	"backup-server/internal/ws"
 )
@@ -24,6 +25,8 @@ type API struct {
 	Hub          *ws.Hub
 	Sessions     *auth.SessionSigner
 	DownloadsDir string
+	// Queue serializes backups across devices; see internal/queue.
+	Queue *queue.Manager
 	// AgentPort is the port agents must be told to connect to. The panel
 	// and the agent listener are different ports (see RegisterPanel vs
 	// RegisterAgent), so the enrollment response can't just echo back
@@ -32,8 +35,12 @@ type API struct {
 	AgentPort string
 }
 
-func New(db *sql.DB, store *storage.Holder, hub *ws.Hub, sessions *auth.SessionSigner, downloadsDir, agentPort string) *API {
-	return &API{DB: db, Store: store, Hub: hub, Sessions: sessions, DownloadsDir: downloadsDir, AgentPort: agentPort}
+func New(db *sql.DB, store *storage.Holder, hub *ws.Hub, sessions *auth.SessionSigner,
+	q *queue.Manager, downloadsDir, agentPort string) *API {
+	return &API{
+		DB: db, Store: store, Hub: hub, Sessions: sessions,
+		Queue: q, DownloadsDir: downloadsDir, AgentPort: agentPort,
+	}
 }
 
 // --- small JSON helpers -----------------------------------------------------

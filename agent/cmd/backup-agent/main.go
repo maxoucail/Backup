@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,6 +54,13 @@ const defaultIntervalMinutes = 360
 const defaultRetentionCount = 7
 const defaultChunkSize = 16 * 1024 * 1024
 const missedBackupGrace = 10 * time.Minute
+
+// queueWaitBeforeOfferingSlot is how long this machine waits for its turn
+// in the server's backup queue before treating the wait as "it isn't
+// going to happen" and asking the user to pick another time. Long enough
+// to sit through another machine's large backup, short enough that the
+// user still gets asked within the same working session.
+const queueWaitBeforeOfferingSlot = 90 * time.Minute
 
 // trayControlAddr is where the Windows Service exposes its small local
 // control API for the tray helper process (last backup date, "back up
@@ -382,6 +390,59 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 	}
 
+	// queuedSince tracks a scheduled backup that the server put in the
+	// queue. If our turn never comes (the machine is about to be shut
+	// down, the queue stays busy all evening), we offer the user another
+	// slot rather than silently skipping the backup entirely.
+	var queuedMu sync.Mutex
+	var queuedSince time.Time
+	markQueued := func(queued bool) {
+		queuedMu.Lock()
+		defer queuedMu.Unlock()
+		if queued {
+			if queuedSince.IsZero() {
+				queuedSince = time.Now()
+			}
+			return
+		}
+		queuedSince = time.Time{}
+	}
+	queuedFor := func() time.Duration {
+		queuedMu.Lock()
+		defer queuedMu.Unlock()
+		if queuedSince.IsZero() {
+			return 0
+		}
+		return time.Since(queuedSince)
+	}
+
+	// offerCatchUpSlot asks the user to pick a time to make up a backup
+	// that didn't happen - whether it was missed while the machine was
+	// off, failed, or never got its turn in the server's queue. All three
+	// end the same way: the machine has no fresh backup and someone should
+	// decide when it gets one. Guarded so overlapping triggers don't stack
+	// several wizards on screen.
+	var catchUpWizardOpen atomic.Bool
+	offerCatchUpSlot := func(reason string) {
+		if !catchUpWizardOpen.CompareAndSwap(false, true) {
+			return
+		}
+		defer catchUpWizardOpen.Store(false)
+
+		log.Printf("proposition d'un nouveau créneau : %s", reason)
+		picked, err := reschedulewizard.Run(agentCtx)
+		if err != nil || picked == nil || agentCtx.Err() != nil {
+			return
+		}
+		chosen := *picked
+		mutateCfg(func(c *config.Config) {
+			c.PendingCatchUpAt = &chosen
+			c.NextScheduledAt = &chosen
+			c.CatchUpNotifiedT15, c.CatchUpNotifiedT5 = false, false
+		})
+		log.Printf("sauvegarde reprogrammée pour %s", chosen.Format(time.RFC1123))
+	}
+
 	// Last-backup state, surfaced to the tray icon's tooltip/menu via the
 	// control API below.
 	var lastBackupMu sync.Mutex
@@ -441,6 +502,19 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			})
 		})
 
+		// Queued behind another machine: the server holds our place and
+		// will start us when a slot frees. Nothing failed, so don't report
+		// a failed backup or close the popup on an error.
+		if errors.Is(err, client.ErrQueued) {
+			log.Printf("sauvegarde en attente: %v", err)
+			if popup != nil {
+				popup.Finish("") // the popup's job is done; the real run gets its own
+			}
+			markQueued(true)
+			return
+		}
+		markQueued(false)
+
 		status, errMsg := protocol.SnapshotStatusSuccess, ""
 		if err != nil {
 			status, errMsg = protocol.SnapshotStatusFailed, err.Error()
@@ -477,6 +551,16 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 				c.PendingCatchUpAt = nil
 				c.CatchUpNotifiedT15, c.CatchUpNotifiedT5 = false, false
 			})
+
+			// A scheduled backup that failed would otherwise just wait for
+			// the next interval, leaving the machine unprotected until then
+			// without anyone being asked. Offer a specific catch-up slot,
+			// the same way a backup missed while powered off is handled.
+			// Runs detached: the wizard waits on a human, and this
+			// goroutine still holds the agent's single-job slot.
+			if err != nil {
+				go offerCatchUpSlot("Votre dernière sauvegarde n'a pas pu être terminée.")
+			}
 		}
 	}
 
@@ -625,6 +709,26 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 				if remaining <= 15*time.Minute && !t15 {
 					mutateCfg(func(c *config.Config) { c.CatchUpNotifiedT15 = true })
 					osui.Notify("Sauvegarde programmée", "Veuillez laisser votre ordinateur allumé : une sauvegarde de rattrapage démarrera à "+target.Format("15:04")+".")
+				}
+			}
+		}
+	}()
+
+	// Waiting in the server's queue is normal and usually short. But if our
+	// turn genuinely never comes - the queue stays saturated all evening,
+	// or the machine is heading for shutdown - the backup would silently
+	// not happen. Past a threshold, ask the user for a slot instead.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-agentCtx.Done():
+				return
+			case <-ticker.C:
+				if queuedFor() > queueWaitBeforeOfferingSlot {
+					markQueued(false)
+					offerCatchUpSlot("Le tour de cette machine dans la file d'attente n'est pas venu.")
 				}
 			}
 		}

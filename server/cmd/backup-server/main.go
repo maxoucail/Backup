@@ -21,6 +21,7 @@ import (
 	"backup-server/internal/config"
 	"backup-server/internal/db"
 	"backup-server/internal/models"
+	"backup-server/internal/queue"
 	"backup-server/internal/scheduler"
 	"backup-server/internal/storage"
 	"backup-server/internal/web"
@@ -55,7 +56,27 @@ func main() {
 
 	sessions := auth.NewSessionSigner(cfg.SessionSecret)
 	hub := ws.NewHub(sqlDB)
-	apiServer := api.New(sqlDB, storeHolder, hub, sessions, cfg.DownloadsDir, cfg.AgentPort)
+
+	// Backups are serialized fleet-wide: the queue hands out slots and, as
+	// each frees up, tells the next waiting device to start. The limit is
+	// read from settings on every decision so changing it in the panel
+	// takes effect immediately.
+	backupQueue := queue.New(
+		func() int {
+			s, err := models.GetSettings(sqlDB)
+			if err != nil {
+				return 1
+			}
+			return s.MaxConcurrentBackups
+		},
+		func(deviceID string) bool {
+			return hub.SendCommand(deviceID, ws.Envelope{Type: ws.TypeBackupNow})
+		},
+	)
+	// A machine that drops off mid-backup must not hold the queue shut.
+	hub.OnDisconnect = backupQueue.Forget
+
+	apiServer := api.New(sqlDB, storeHolder, hub, sessions, backupQueue, cfg.DownloadsDir, cfg.AgentPort)
 	webServer, err := web.New(sessions)
 	if err != nil {
 		log.Fatalf("panneau web: %v", err)
@@ -75,7 +96,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go scheduler.Run(ctx, sqlDB, storeHolder)
+	go scheduler.Run(ctx, sqlDB, storeHolder, backupQueue)
 
 	panelAddr := cfg.ListenHost + ":" + cfg.PanelPort
 	agentAddr := cfg.ListenHost + ":" + cfg.AgentPort

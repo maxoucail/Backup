@@ -38,6 +38,10 @@ func (a *API) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "le chemin de stockage est requis")
 		return
 	}
+	if req.MaxConcurrentBackups < 1 {
+		writeError(w, http.StatusBadRequest, "le nombre de sauvegardes simultanées doit être au moins 1")
+		return
+	}
 
 	current, err := models.GetSettings(a.DB)
 	if err != nil {

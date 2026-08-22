@@ -69,6 +69,12 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 
 	snapshotID, err := c.CreateSnapshot(ctx, kind)
 	if err != nil {
+		// Queued behind another machine: not a failure, and deliberately
+		// no snapshot row exists yet, so there's nothing to mark failed.
+		// The server will send a start command when a slot frees up.
+		if errors.Is(err, client.ErrQueued) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("création de la sauvegarde: %w", err)
 	}
 

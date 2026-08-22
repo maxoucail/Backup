@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS settings (
 	default_retention_count INTEGER NOT NULL DEFAULT 7,
 	event_retention_days INTEGER NOT NULL DEFAULT 30,
 	event_retention_max_rows INTEGER NOT NULL DEFAULT 20000,
-	chunk_size_bytes INTEGER NOT NULL DEFAULT 16777216
+	chunk_size_bytes INTEGER NOT NULL DEFAULT 16777216,
+	max_concurrent_backups INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS enrollment_keys (
@@ -108,7 +109,61 @@ func Open(dbPath string) (*sql.DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
+	if err := migrate(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrating schema: %w", err)
+	}
 	return sqlDB, nil
+}
+
+// migrate brings an already-existing database up to the current schema.
+// CREATE TABLE IF NOT EXISTS above only helps a fresh install: a server
+// that has been running since before a column was introduced would keep
+// its old table shape and every query touching the new column would fail.
+// Each entry is additive and idempotent, so upgrading is just restarting
+// the binary.
+func migrate(sqlDB *sql.DB) error {
+	columns := []struct{ table, column, definition string }{
+		{"settings", "max_concurrent_backups", "INTEGER NOT NULL DEFAULT 1"},
+	}
+	for _, c := range columns {
+		exists, err := columnExists(sqlDB, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.definition)
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			return fmt.Errorf("%s.%s: %w", c.table, c.column, err)
+		}
+		log.Printf("migration: colonne %s.%s ajoutée", c.table, c.column)
+	}
+	return nil
+}
+
+func columnExists(sqlDB *sql.DB, table, column string) (bool, error) {
+	rows, err := sqlDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid         int
+			name, ctype string
+			notNull, pk int
+			dfltValue   sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Bootstrap seeds the settings row and, if no admin exists yet, creates a

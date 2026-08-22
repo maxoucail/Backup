@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"backup-server/internal/models"
+	"backup-server/internal/queue"
 	"backup-server/internal/storage"
 )
 
@@ -78,8 +79,37 @@ func RotateRetention(db *sql.DB, storeHolder *storage.Holder, deviceID string) (
 	return deleted, nil
 }
 
+// staleBackupAfter is how long a snapshot may sit in "running" before it's
+// written off. A backup slot is normally released when the agent finishes
+// or its connection drops, so this only catches the case where neither
+// happened - a machine that lost power mid-backup, say. Generous enough
+// not to cut off a genuinely slow first backup of a large disk.
+const staleBackupAfter = 12 * time.Hour
+
+// releaseStaleBackups marks abandoned snapshots as failed and frees the
+// queue slots they were holding, so one dead machine can't stop every
+// other device from ever backing up again.
+func releaseStaleBackups(db *sql.DB, q *queue.Manager) {
+	for _, deviceID := range q.ReleaseStale(staleBackupAfter) {
+		log.Printf("file d'attente: créneau libéré pour l'appareil %s (sauvegarde sans nouvelles)", deviceID)
+		_ = models.AddEvent(db, &deviceID, models.EventLevelWarning,
+			"Sauvegarde interrompue sans réponse de la machine : créneau libéré pour les autres appareils.")
+	}
+	// Snapshot rows outlive the in-memory slot (a server restart clears the
+	// queue but not the database), so close out anything still marked
+	// running well past the deadline.
+	cutoff := time.Now().Add(-staleBackupAfter).UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE snapshots SET status = 'failed', finished_at = ?, error_message = ?
+		 WHERE status = 'running' AND started_at < ?`,
+		time.Now().UTC().Format(time.RFC3339), "interrompue : plus de nouvelles de la machine", cutoff)
+	if err != nil {
+		log.Printf("scheduler: clôture des sauvegardes abandonnées: %v", err)
+	}
+}
+
 // Run blocks, performing periodic maintenance until ctx is cancelled.
-func Run(ctx context.Context, db *sql.DB, store *storage.Holder) {
+func Run(ctx context.Context, db *sql.DB, store *storage.Holder, q *queue.Manager) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -98,6 +128,8 @@ func Run(ctx context.Context, db *sql.DB, store *storage.Holder) {
 			} else if n > 0 {
 				log.Printf("scheduler: marked %d device(s) offline (no check-in)", n)
 			}
+
+			releaseStaleBackups(db, q)
 
 			if n, err := models.PurgeExpiredEnrollmentKeys(db); err != nil {
 				log.Printf("scheduler: purge enrollment keys: %v", err)
