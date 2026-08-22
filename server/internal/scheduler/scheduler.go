@@ -65,7 +65,7 @@ func RotateRetention(db *sql.DB, storeHolder *storage.Holder, deviceID string) (
 		if err != nil {
 			return deleted, err
 		}
-		freed, removed, err := store.GarbageCollect(remaining)
+		freed, removed, err := store.GarbageCollect(remaining, storage.GraceCutoff())
 		if err != nil {
 			log.Printf("retention: garbage collection error: %v", err)
 		} else {

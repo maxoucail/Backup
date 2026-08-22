@@ -134,7 +134,7 @@ func (a *API) deleteDeviceAndReclaim(id string) error {
 	go func() {
 		remaining, err := models.AllManifestPaths(a.DB)
 		if err == nil {
-			_, _, _ = store.GarbageCollect(remaining)
+			_, _, _ = store.GarbageCollect(remaining, storage.GraceCutoff())
 		}
 	}()
 	return nil

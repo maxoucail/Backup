@@ -8,6 +8,7 @@ package backupjob
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -46,6 +47,10 @@ type Result struct {
 	FileCount     int
 	LogicalBytes  int64
 	UploadedBytes int64
+	// SkippedFiles are files left out of this snapshot because their data
+	// couldn't be read or uploaded (typically edited or locked while the
+	// backup ran). The rest of the snapshot is complete and restorable.
+	SkippedFiles []string
 }
 
 func Run(ctx context.Context, c *client.Client, kind string, roots []string, chunkSize int64, onProgress ProgressFunc) (*Result, error) {
@@ -151,9 +156,21 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 
 	var uploadedBytes int64
 	var uploadedMu sync.Mutex
-	var uploadErr error
-	var errMu sync.Mutex
 	start := time.Now()
+
+	// A backup runs against a live machine: files get edited, locked or
+	// deleted while it works (a mail client's data file, a document the
+	// user saves, a browser profile). Those produce per-chunk failures -
+	// a read error, or a hash the server rejects because the bytes changed
+	// since we hashed them. Failing the entire run for one such file would
+	// mean routinely losing the backup of everything else, so failures are
+	// collected per chunk and only the affected files are dropped from the
+	// manifest. fatalErr is reserved for problems that make continuing
+	// pointless (credentials revoked), where finishing is the wrong answer.
+	failedChunks := make(map[string]struct{})
+	var skippedFiles []string
+	var fatalErr error
+	var errMu sync.Mutex
 
 	if len(tasks) > 0 {
 		onProgress(Progress{Phase: "uploading", FileCount: len(files), LogicalBytes: logicalBytes})
@@ -167,17 +184,13 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 				for t := range taskCh {
 					r, err := hasher.ChunkReader(t.path, t.index, chunkSize)
 					if err != nil {
-						errMu.Lock()
-						uploadErr = err
-						errMu.Unlock()
+						noteChunkFailure(&errMu, failedChunks, &fatalErr, t.hash, t.path, err)
 						continue
 					}
 					err = c.UploadChunk(ctx, t.hash, r, t.size)
 					r.Close()
 					if err != nil {
-						errMu.Lock()
-						uploadErr = err
-						errMu.Unlock()
+						noteChunkFailure(&errMu, failedChunks, &fatalErr, t.hash, t.path, err)
 						continue
 					}
 					uploadedMu.Lock()
@@ -218,12 +231,31 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 		if ctx.Err() != nil {
 			return finishFailed(ctx, c, snapshotID, "annulé", protocol.SnapshotStatusCancelled)
 		}
-		if uploadErr != nil {
-			return finishFailed(ctx, c, snapshotID, uploadErr.Error(), protocol.SnapshotStatusFailed)
+		if fatalErr != nil {
+			return finishFailed(ctx, c, snapshotID, fatalErr.Error(), protocol.SnapshotStatusFailed)
 		}
 	}
 
-	onProgress(Progress{Phase: "finalizing", FileCount: len(files), LogicalBytes: logicalBytes, UploadedBytes: uploadedBytes, Percent: 100})
+	// Drop files whose data didn't make it, keeping everything that did.
+	if len(failedChunks) > 0 {
+		kept := manifest.Files[:0]
+		for _, f := range manifest.Files {
+			if referencesFailedChunk(f, failedChunks) {
+				skippedFiles = append(skippedFiles, f.Path)
+				continue
+			}
+			kept = append(kept, f)
+		}
+		manifest.Files = kept
+		log.Printf("backup: %d fichier(s) ignoré(s) car modifiés ou illisibles pendant la sauvegarde", len(skippedFiles))
+
+		if len(manifest.Files) == 0 {
+			return finishFailed(ctx, c, snapshotID,
+				"aucun fichier n'a pu être sauvegardé", protocol.SnapshotStatusFailed)
+		}
+	}
+
+	onProgress(Progress{Phase: "finalizing", FileCount: len(manifest.Files), LogicalBytes: logicalBytes, UploadedBytes: uploadedBytes, Percent: 100})
 
 	manifest.SnapshotID = snapshotID
 	if err := c.SubmitManifest(ctx, snapshotID, manifest); err != nil {
@@ -235,7 +267,35 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 
 	saveCache(manifest)
 
-	return &Result{SnapshotID: snapshotID, FileCount: len(manifest.Files), LogicalBytes: logicalBytes, UploadedBytes: uploadedBytes}, nil
+	return &Result{
+		SnapshotID: snapshotID, FileCount: len(manifest.Files),
+		LogicalBytes: logicalBytes, UploadedBytes: uploadedBytes, SkippedFiles: skippedFiles,
+	}, nil
+}
+
+// noteChunkFailure records that one chunk couldn't be uploaded. An
+// authentication failure is escalated to fatal: the device has been
+// decommissioned server-side, so every remaining chunk would fail too and
+// the agent needs to stop and re-enroll rather than grind through the
+// whole file list.
+func noteChunkFailure(mu *sync.Mutex, failed map[string]struct{}, fatal *error, hash, path string, err error) {
+	mu.Lock()
+	defer mu.Unlock()
+	failed[hash] = struct{}{}
+	if errors.Is(err, client.ErrUnauthorized) && *fatal == nil {
+		*fatal = err
+		return
+	}
+	log.Printf("backup: chunk ignoré pour %s: %v", path, err)
+}
+
+func referencesFailedChunk(f protocol.ManifestFile, failed map[string]struct{}) bool {
+	for _, h := range f.Chunks {
+		if _, bad := failed[h]; bad {
+			return true
+		}
+	}
+	return false
 }
 
 func finishFailed(ctx context.Context, c *client.Client, snapshotID, message, status string) (*Result, error) {

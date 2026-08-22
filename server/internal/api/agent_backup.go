@@ -91,9 +91,15 @@ func (a *API) handleAgentCheckChunks(w http.ResponseWriter, r *http.Request, dev
 			writeError(w, http.StatusBadRequest, "hash invalide: "+h)
 			return
 		}
-		if !store.HasChunk(h) {
-			missing = append(missing, h)
+		if store.HasChunk(h) {
+			// This backup is about to depend on a chunk it won't upload.
+			// Mark it in use so retention rotation of whichever snapshot
+			// originally stored it can't collect it out from under us
+			// before this backup's manifest lands.
+			store.Touch(h)
+			continue
 		}
+		missing = append(missing, h)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"missing": missing})
 }

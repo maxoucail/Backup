@@ -69,7 +69,21 @@ existe déjà sur le serveur via un autre appareil.
   conserver pour un appareil (réglable par appareil ou par défaut global),
   les plus anciennes sont supprimées puis un garbage collector parcourt le
   dépôt de blocs et supprime tout bloc qu'aucun manifeste restant ne
-  référence plus.
+  référence plus **et** qui n'a pas été écrit ou utilisé dans les
+  dernières 24 h (`chunkGracePeriod`).
+
+  Ce délai de grâce n'est pas cosmétique : un bloc n'est référencé par un
+  manifeste qu'à la *fin* d'une sauvegarde, alors que son envoi a pu durer
+  des heures. Sans lui, une rotation déclenchée par un autre appareil
+  pendant ce laps de temps supprimerait les blocs de la sauvegarde en
+  cours — la faisant échouer, ou pire, en cas de course avec l'écriture du
+  manifeste, laissant un snapshot marqué « réussi » dont les données ont
+  déjà disparu. Les blocs simplement *réutilisés* par déduplication sont
+  également « touchés » (`Store.Touch`, appelé à la vérification des
+  chunks) : sans cela, un bloc ancien emprunté par une nouvelle sauvegarde
+  resterait collectable si le snapshot qui l'avait initialement stocké
+  était purgé entre-temps. Le seul coût de ce délai est de retarder la
+  récupération d'espace ; le coût inverse serait une perte de données.
 - **Purge des événements** : la table `events` est bornée par ancienneté
   (jours) et par nombre de lignes maximum, tous deux réglables depuis
   **Paramètres**. Sans cette purge, une base SQLite accumulerait

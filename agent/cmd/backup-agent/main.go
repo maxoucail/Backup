@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -447,6 +448,20 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			log.Printf("sauvegarde échouée: %v", err)
 		} else {
 			log.Printf("sauvegarde terminée: %d fichiers, %d octets envoyés", result.FileCount, result.UploadedBytes)
+			if n := len(result.SkippedFiles); n > 0 {
+				// Surfaced as a warning rather than swallowed: the snapshot
+				// is usable, but the operator should know these files
+				// aren't in it (typically open/locked during the run).
+				sample := result.SkippedFiles
+				if len(sample) > 5 {
+					sample = sample[:5]
+				}
+				wsc.Send(protocol.Envelope{
+					Type: protocol.TypeLog, Level: protocol.LevelWarning,
+					Message: fmt.Sprintf("%d fichier(s) ignoré(s) (modifiés ou verrouillés pendant la sauvegarde), par exemple : %s",
+						n, strings.Join(sample, ", ")),
+				})
+			}
 		}
 		recordLastBackup(status)
 		wsc.Send(protocol.Envelope{Type: protocol.TypeBackupFinished, Status: status, ErrorMessage: errMsg})

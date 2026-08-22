@@ -31,7 +31,19 @@ type agentConn struct {
 	deviceID string
 	conn     *websocket.Conn
 	send     chan Envelope
+
+	// lastProgressWrite throttles snapshot-progress persistence; only
+	// touched from readPump's goroutine, so it needs no lock.
+	lastProgressWrite time.Time
 }
+
+// progressWriteInterval bounds how often a device's progress is persisted.
+// Agents report progress after every uploaded chunk, which for a large
+// backup is thousands of messages - and with several devices backing up at
+// once that turns into a steady stream of UPDATEs competing for SQLite's
+// single writer. The panel polls every few seconds anyway, so persisting
+// more often than this buys nothing.
+const progressWriteInterval = 2 * time.Second
 
 // Hub tracks every currently-connected agent so the panel can send it
 // commands and know whether it's online. One goroutine pair (reader +
@@ -87,8 +99,13 @@ func (h *Hub) ServeAgent(w http.ResponseWriter, r *http.Request, deviceID, remot
 	h.mu.Lock()
 	if old, exists := h.conns[deviceID]; exists {
 		// A previous connection for the same device is being replaced
-		// (agent reconnected); close the stale one.
-		close(old.send)
+		// (agent reconnected after a network blip). Close the socket and
+		// let the old pumps unwind on their own: closing old.send here
+		// instead would race SendCommand, which by design does its channel
+		// write after releasing h.mu - and a send on a closed channel is
+		// an unrecoverable panic that would take the whole server down.
+		// Closing the conn makes the old readPump fail, which closes its
+		// done channel, which stops the old writePump.
 		_ = old.conn.Close()
 	}
 	h.conns[deviceID] = ac
@@ -130,7 +147,7 @@ func (h *Hub) readPump(ac *agentConn, done chan struct{}) {
 			log.Printf("ws: bad message from %s: %v", ac.deviceID, err)
 			continue
 		}
-		h.handleIncoming(ac.deviceID, env)
+		h.handleIncoming(ac, env)
 	}
 }
 
@@ -143,12 +160,10 @@ func (h *Hub) writePump(ac *agentConn, done chan struct{}) {
 
 	for {
 		select {
-		case env, ok := <-ac.send:
+		// ac.send is deliberately never closed (see ServeAgent): this pump
+		// stops via done or a failed write, never via a channel close.
+		case env := <-ac.send:
 			_ = ac.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				_ = ac.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
 			data, err := json.Marshal(env)
 			if err != nil {
 				continue
@@ -167,14 +182,20 @@ func (h *Hub) writePump(ac *agentConn, done chan struct{}) {
 	}
 }
 
-func (h *Hub) handleIncoming(deviceID string, env Envelope) {
+func (h *Hub) handleIncoming(ac *agentConn, env Envelope) {
+	deviceID := ac.deviceID
 	switch env.Type {
 	case TypeHello:
 		_, _ = h.db.Exec(`UPDATE devices SET os_name=?, os_version=?, agent_version=?, hostname=? WHERE id=?`,
 			env.OSName, env.OSVersion, env.AgentVersion, env.Hostname, deviceID)
 
 	case TypeProgress:
-		if env.SnapshotID != "" {
+		// Persist at most one progress update per interval per device, but
+		// never drop a terminal one - the panel would otherwise show a
+		// backup stuck at whatever percentage the last throttled write
+		// happened to catch.
+		if env.SnapshotID != "" && (env.Percent >= 100 || time.Since(ac.lastProgressWrite) >= progressWriteInterval) {
+			ac.lastProgressWrite = time.Now()
 			_ = models.UpdateSnapshotProgress(h.db, env.SnapshotID, env.FileCount, env.LogicalBytes, env.UploadedBytes, env.Percent)
 		}
 
