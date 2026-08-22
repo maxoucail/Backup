@@ -41,7 +41,7 @@ func (a *API) handleCreateEnrollmentKey(w http.ResponseWriter, r *http.Request) 
 		"id":          key.ID,
 		"token":       token,
 		"expires_at":  key.ExpiresAt,
-		"server_host": r.Host,
+		"server_host": a.agentHost(r),
 	})
 }
 

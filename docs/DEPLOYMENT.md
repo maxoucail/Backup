@@ -24,13 +24,17 @@ Le script `install.sh` :
 - prépare `/var/lib/backup-server` (base SQLite, secrets) et, si fourni, le
   chemin de stockage NAS avec les bons droits ;
 - installe et active le service systemd (`backup-server.service`), avec
-  durcissement (`ProtectSystem=strict`, `NoNewPrivileges`, etc.) ;
+  durcissement (`ProtectSystem=strict`, `NoNewPrivileges`, etc.) et le droit
+  de se lier au port 80 sans tourner en root
+  (`AmbientCapabilities=CAP_NET_BIND_SERVICE`) ;
 - démarre le service.
 
 Le mot de passe administrateur initial est généré aléatoirement au premier
 démarrage et visible via `journalctl -u backup-server -n 50`, ainsi que dans
 `/var/lib/backup-server/initial_admin_password.txt`. Connectez-vous sur
-`http://<ip>:8420` puis changez-le immédiatement depuis **Paramètres**.
+`http://<ip>` (port 80, panneau admin) puis changez-le immédiatement depuis
+**Paramètres**. Voir la section **Ports** du README pour le détail des deux
+ports (80 = panneau, 8420 = trafic agent) et comment les changer.
 
 ### Mettre à jour le serveur
 

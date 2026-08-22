@@ -54,14 +54,25 @@ func (w2 *Web) isAuthenticated(r *http.Request) bool {
 	return err == nil
 }
 
-func (w2 *Web) Register(mux *http.ServeMux) {
+// RegisterShared wires the pages meant to be reachable from anywhere a
+// workstation might be: static assets and the installer download page.
+// Registered on both the panel and the agent listener, mirroring
+// api.RegisterShared - the download page's own JS calls the download API,
+// so both need to be reachable together on whichever port a given machine
+// can actually reach.
+func (w2 *Web) RegisterShared(mux *http.ServeMux) {
 	staticSub, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 
 	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
 		w2.render(w, "download.html")
 	})
+}
 
+// RegisterPanel wires the admin-only pages: login and every
+// session-protected page. Meant for the panel listener, which an operator
+// can firewall off to an admin-only network - see api.RegisterPanel.
+func (w2 *Web) RegisterPanel(mux *http.ServeMux) {
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
 		if w2.isAuthenticated(r) {
 			http.Redirect(w, r, "/", http.StatusFound)

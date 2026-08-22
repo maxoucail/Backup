@@ -26,6 +26,17 @@ Deux plans de communication séparés entre agent et serveur :
   classique par opération, ce qui permet la parallélisation native (upload
   de plusieurs blocs à la fois) et des reprises simples.
 
+Ces deux plans tournent en plus sur des **ports séparés** au niveau
+réseau (pas seulement des routes) : le panneau admin sur un port
+(80 par défaut), le trafic agent (enrôlement, plans de contrôle et de
+données ci-dessus) sur un autre (8420 par défaut) - `cmd/backup-server`
+démarre deux `http.Server` distincts, chacun avec son propre
+`http.ServeMux` peuplé par `api.RegisterPanel`/`api.RegisterAgent`. Ça
+permet d'appliquer des règles de pare-feu différentes aux deux : le port
+admin restreint à un VLAN de gestion, le port agent ouvert à tous les
+VLAN où vivent des postes à sauvegarder. Voir la section **Ports** du
+README pour le détail.
+
 Garder ces deux plans séparés évite qu'un transfert de plusieurs Go bloque
 la réactivité des commandes, et permet à plusieurs appareils de sauvegarder
 en même temps sans qu'aucun ne bloque les autres (chaque connexion/requête

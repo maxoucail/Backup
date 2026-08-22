@@ -2,19 +2,24 @@ package api
 
 import "net/http"
 
-// Register wires every route onto mux. Two trust domains share this mux:
-// session-cookie-authenticated panel endpoints under /api/... and
-// device-secret-authenticated agent endpoints under /api/agent/... plus
-// /ws/agent. Go 1.22's method+pattern ServeMux keeps this a flat, readable
-// list instead of needing a third-party router.
-func (a *API) Register(mux *http.ServeMux) {
-	// Public.
-	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
-	mux.HandleFunc("POST /api/agent/enroll", a.handleAgentEnroll)
+// RegisterShared wires the routes meant to be reachable from anywhere a
+// workstation might be (installer downloads): not sensitive, so it's
+// registered on both the panel and the agent listener rather than forcing
+// a specific one - whichever port an operator's firewall rules leave open
+// to a given machine, the download page still works from it.
+func (a *API) RegisterShared(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/downloads", a.handleListDownloads)
 	mux.HandleFunc("GET /downloads/{name}", a.handleDownloadFile)
+}
 
-	// Panel session.
+// RegisterPanel wires the admin web panel: the login page's API, every
+// session-cookie-authenticated management endpoint, and the HTML/static
+// serving is added separately by web.Register. Meant to be bound to a
+// port an operator can firewall off to an admin-only network/VLAN,
+// separate from the agent listener that every backed-up workstation must
+// be able to reach.
+func (a *API) RegisterPanel(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
 	mux.HandleFunc("POST /api/auth/logout", a.requireSession(a.handleLogout))
 	mux.HandleFunc("GET /api/auth/me", a.requireSession(a.handleMe))
 	mux.HandleFunc("POST /api/account/credentials", a.requireSession(a.handleChangeCredentials))
@@ -42,8 +47,15 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/downloads/{name}", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
 		a.handleDeleteDownload(w, r, r.PathValue("name"))
 	}))
+}
 
-	// Agent data plane.
+// RegisterAgent wires the device-secret-authenticated data plane
+// (enrollment, chunk upload/download, manifests, snapshot lifecycle) and
+// the WebSocket control channel. Meant to be bound to a port reachable
+// from every VLAN/subnet a backed-up workstation might be on - unlike the
+// panel, this has to be broadly reachable for the product to work at all.
+func (a *API) RegisterAgent(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/agent/enroll", a.handleAgentEnroll)
 	mux.HandleFunc("GET /api/agent/config", a.requireDevice(a.handleAgentGetConfig))
 	mux.HandleFunc("POST /api/agent/snapshots", a.requireDevice(a.handleAgentCreateSnapshot))
 	mux.HandleFunc("POST /api/agent/snapshots/{id}/check-chunks", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
@@ -65,7 +77,6 @@ func (a *API) Register(mux *http.ServeMux) {
 		a.handleAgentFinishSnapshot(w, r, deviceID, r.PathValue("id"))
 	}))
 
-	// Agent control-plane WebSocket.
 	mux.HandleFunc("GET /ws/agent", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
 		a.Hub.ServeAgent(w, r, deviceID, clientIP(r))
 	}))

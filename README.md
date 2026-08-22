@@ -81,6 +81,23 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
 Voir `docs/ARCHITECTURE.md` pour le détail du protocole et des choix de
 conception, et `docs/DEPLOYMENT.md` pour l'installation pas à pas.
 
+## Ports
+
+Le serveur écoute sur **deux ports séparés**, exprès, pour permettre des
+règles de pare-feu/inter-VLAN différentes :
+
+| Port | Contenu | Qui doit pouvoir y accéder |
+|---|---|---|
+| **80** (`BACKUP_SERVER_PANEL_PORT`) | Panneau admin : connexion, tableau de bord, gestion des appareils/paramètres | Uniquement votre réseau/VLAN d'administration |
+| **8420** (`BACKUP_SERVER_AGENT_PORT`) | Trafic agents : enrôlement, upload/download des sauvegardes, WebSocket de contrôle, page `/download` | Tous les VLAN où se trouvent les postes à sauvegarder |
+
+Un agent ne parle jamais au port 80 : la clé d'enrôlement générée dans le
+panneau embarque déjà l'adresse du port 8420. Les deux ports sont
+réglables via ces variables d'environnement (voir
+`server/systemd/backup-server.service`) ; le service systemd fourni
+obtient le droit de se lier au port 80 sans tourner en root
+(`AmbientCapabilities=CAP_NET_BIND_SERVICE`).
+
 ## Démarrage rapide
 
 ### Serveur (Debian 13)

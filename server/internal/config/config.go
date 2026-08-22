@@ -20,7 +20,8 @@ type Config struct {
 	StorageRoot   string
 	DownloadsDir  string
 	ListenHost    string
-	ListenPort    string
+	PanelPort     string // admin web panel: login, dashboard, settings, device management
+	AgentPort     string // agent traffic: enrollment, chunk upload/download, WebSocket control channel
 	SessionSecret string
 }
 
@@ -54,13 +55,21 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// BACKUP_SERVER_PORT is the old single-port variable name; kept as the
+	// default for AgentPort so an existing deployment that only set that
+	// one variable keeps working exactly as before (agents already
+	// configured with that port keep reaching the server) after upgrading
+	// to the split panel/agent listeners.
+	agentPort := envOr("BACKUP_SERVER_AGENT_PORT", envOr("BACKUP_SERVER_PORT", "8420"))
+
 	return &Config{
 		DataDir:       dataDir,
 		DBPath:        filepath.Join(dataDir, "server.db"),
 		StorageRoot:   storageRoot,
 		DownloadsDir:  downloadsDir,
 		ListenHost:    envOr("BACKUP_SERVER_HOST", "0.0.0.0"),
-		ListenPort:    envOr("BACKUP_SERVER_PORT", "8420"),
+		PanelPort:     envOr("BACKUP_SERVER_PANEL_PORT", "80"),
+		AgentPort:     agentPort,
 		SessionSecret: secret,
 	}, nil
 }

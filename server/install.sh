@@ -49,13 +49,16 @@ echo "==> Installation du service systemd"
 UNIT_FILE=/etc/systemd/system/backup-server.service
 cp "$SCRIPT_DIR/systemd/backup-server.service" "$UNIT_FILE"
 if [ -n "$STORAGE_ROOT" ]; then
-	sed -i "/^Environment=BACKUP_SERVER_PORT/a Environment=BACKUP_SERVER_STORAGE_ROOT=$STORAGE_ROOT" "$UNIT_FILE"
+	sed -i "/^Environment=BACKUP_SERVER_AGENT_PORT/a Environment=BACKUP_SERVER_STORAGE_ROOT=$STORAGE_ROOT" "$UNIT_FILE"
 	sed -i "s#^ReadWritePaths=.*#ReadWritePaths=$DATA_DIR $STORAGE_ROOT#" "$UNIT_FILE"
 fi
 
 systemctl daemon-reload
 systemctl enable --now backup-server
 
+IP="$(hostname -I | awk '{print $1}')"
 echo "==> Terminé."
-echo "Le panneau est accessible sur http://$(hostname -I | awk '{print $1}'):8420"
+echo "Panneau d'administration : http://$IP (port 80 - à restreindre à votre réseau/VLAN d'administration)"
+echo "Trafic agent (enrôlement, sauvegardes) : port 8420 - doit rester joignable depuis les VLAN des postes à sauvegarder"
+echo "Ces deux ports se règlent via BACKUP_SERVER_PANEL_PORT / BACKUP_SERVER_AGENT_PORT dans $UNIT_FILE"
 echo "Identifiants administrateur initiaux : voir 'journalctl -u backup-server -n 50' ou $DATA_DIR/initial_admin_password.txt"
