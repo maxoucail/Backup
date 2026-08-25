@@ -55,10 +55,25 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// decodeJSON is for panel-originated requests: the panel's JS is served by
+// this exact server binary, so there's no version skew possible - an
+// unknown field there is a real bug worth rejecting loudly rather than
+// silently ignoring.
 func decodeJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
+}
+
+// decodeJSONLenient is for agent-originated requests. Unlike the panel,
+// the agent and server are separately versioned and deployed independently
+// - an operator can (and normally does) update one without the other in
+// the same minute. Rejecting an unknown field here means every additive,
+// backward-compatible protocol change (a new optional manifest field, say)
+// hard-fails every backup with a cryptic "manifeste invalide" the moment
+// an updated agent talks to a server that hasn't been redeployed yet.
+func decodeJSONLenient(r *http.Request, v any) error {
+	return json.NewDecoder(r.Body).Decode(v)
 }
 
 // agentHost returns the host:port an agent should be told to connect to:

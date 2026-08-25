@@ -58,7 +58,7 @@ type createSnapshotRequest struct {
 
 func (a *API) handleAgentCreateSnapshot(w http.ResponseWriter, r *http.Request, deviceID string) {
 	var req createSnapshotRequest
-	if err := decodeJSON(r, &req); err != nil || (req.Kind != models.SnapshotKindManual && req.Kind != models.SnapshotKindScheduled) {
+	if err := decodeJSONLenient(r, &req); err != nil || (req.Kind != models.SnapshotKindManual && req.Kind != models.SnapshotKindScheduled) {
 		writeError(w, http.StatusBadRequest, "type de sauvegarde invalide")
 		return
 	}
@@ -94,7 +94,7 @@ type checkChunksRequest struct {
 // behaviour: only genuinely new or changed data crosses the network.
 func (a *API) handleAgentCheckChunks(w http.ResponseWriter, r *http.Request, deviceID string) {
 	var req checkChunksRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSONLenient(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "requête invalide")
 		return
 	}
@@ -160,7 +160,7 @@ func (a *API) handleAgentSubmitManifest(w http.ResponseWriter, r *http.Request, 
 
 	var manifest storage.Manifest
 	r.Body = http.MaxBytesReader(w, r.Body, 256*1024*1024)
-	if err := decodeJSON(r, &manifest); err != nil {
+	if err := decodeJSONLenient(r, &manifest); err != nil {
 		writeError(w, http.StatusBadRequest, "manifeste invalide")
 		return
 	}
@@ -228,7 +228,7 @@ func (a *API) handleAgentFinishSnapshot(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var req finishSnapshotRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSONLenient(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "requête invalide")
 		return
 	}
