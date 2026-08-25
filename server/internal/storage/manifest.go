@@ -16,6 +16,10 @@ type ManifestFile struct {
 	ModTime int64    `json:"mtime"`
 	SHA256  string   `json:"sha256"`
 	Chunks  []string `json:"chunks"`
+	// AbsPath mirrors backup-agent/internal/protocol.ManifestFile.AbsPath
+	// - the server only stores and relays it, restoring is entirely an
+	// agent-side concern.
+	AbsPath string `json:"abs_path,omitempty"`
 }
 
 type Manifest struct {

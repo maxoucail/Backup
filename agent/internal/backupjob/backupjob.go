@@ -111,6 +111,9 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 			continue
 		}
 		mf := protocol.ManifestFile{Path: fe.RelPath, Size: fe.Size, ModTime: fe.ModTime, SHA256: res.SHA256, Chunks: res.Chunks}
+		if scanner.IsOutsideHome(fe.RelPath) {
+			mf.AbsPath = fe.AbsPath
+		}
 		manifest.Files = append(manifest.Files, mf)
 
 		for idx, h := range res.Chunks {

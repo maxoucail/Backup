@@ -147,18 +147,34 @@ loop:
 	return &Result{FileCount: restoredFiles, Bytes: restoredBytes, SkippedFiles: skippedFiles}, nil
 }
 
-func restoreFile(ctx context.Context, c *client.Client, home string, f protocol.ManifestFile) error {
-	// Defense in depth: a manifest written by an older, buggy agent could
-	// still carry a raw absolute path (e.g. a Windows drive letter, "E:")
-	// as its "relative" path. Joining that onto home would try to create a
-	// literal "E:" directory, which every Windows API rejects outright -
-	// stripping stray colons here means even a pre-existing bad manifest
-	// restores into a slightly odd but valid location instead of failing.
+// homeRelativeDest is the always-restorable fallback destination: under
+// home, using the sanitized relative path. Defense in depth on top of that
+// sanitization - a manifest written by an older, buggy agent could still
+// carry a raw absolute path (e.g. a Windows drive letter, "E:") as its
+// "relative" path, and joining that onto home would try to create a
+// literal "E:" directory, which every Windows API rejects outright.
+func homeRelativeDest(home string, f protocol.ManifestFile) string {
 	relPath := filepath.FromSlash(f.Path)
 	if strings.Contains(relPath, ":") {
 		relPath = strings.ReplaceAll(relPath, ":", "")
 	}
-	dest := filepath.Join(home, relPath)
+	return filepath.Join(home, relPath)
+}
+
+func restoreFile(ctx context.Context, c *client.Client, home string, f protocol.ManifestFile) error {
+	dest := homeRelativeDest(home, f)
+	if f.AbsPath != "" {
+		// The file lived outside home when backed up (a manually
+		// configured root on another drive than home). Try putting it
+		// back exactly where it was - same machine, same drive still
+		// present - before falling back to the home-relative location:
+		// silently relocating every such file under home on every
+		// restore, even when the original spot is right there, is more
+		// surprising than useful.
+		if err := os.MkdirAll(filepath.Dir(f.AbsPath), 0o755); err == nil {
+			dest = f.AbsPath
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}

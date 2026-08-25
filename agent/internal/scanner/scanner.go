@@ -164,13 +164,24 @@ func isOutside(rel string) bool {
 // fichier... est incorrecte"). sanitizeSegment strips the colon so the
 // exact same file still restores, just under a folder named "E" instead of
 // pretending to be a second drive letter mid-path.
+const outsideHomePrefix = "_outside/"
+
 func relPath(home, abs string) string {
 	if home != "" {
 		if r, err := filepath.Rel(home, abs); err == nil && !isOutside(r) {
 			return filepath.ToSlash(r)
 		}
 	}
-	return "_outside/" + sanitizeSegment(filepath.ToSlash(abs))
+	return outsideHomePrefix + sanitizeSegment(filepath.ToSlash(abs))
+}
+
+// IsOutsideHome reports whether a RelPath produced by Walk is the
+// _outside-namespaced fallback rather than an ordinary path relative to
+// home - the signal backupjob uses to also record the file's real
+// original AbsPath, so restore can try putting it back where it actually
+// was instead of only ever under home.
+func IsOutsideHome(relPath string) bool {
+	return strings.HasPrefix(relPath, outsideHomePrefix)
 }
 
 // sanitizeSegment strips characters that are illegal inside a path

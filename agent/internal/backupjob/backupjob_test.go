@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"backup-agent/internal/client"
@@ -134,8 +135,13 @@ func TestProgressCallbacksCarryTheSnapshotID(t *testing.T) {
 	c := srv.start(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
+	var mu sync.Mutex
 	var calls []Progress
-	onProgress := func(p Progress) { calls = append(calls, p) }
+	onProgress := func(p Progress) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, p)
+	}
 
 	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []string{dir}, 16*1024*1024, onProgress); err != nil {
 		t.Fatalf("la sauvegarde a échoué: %v", err)

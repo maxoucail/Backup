@@ -11,6 +11,14 @@ type ManifestFile struct {
 	ModTime int64    `json:"mtime"`
 	SHA256  string   `json:"sha256"`
 	Chunks  []string `json:"chunks"`
+	// AbsPath is set only for a file that lived outside the home
+	// directory when backed up (a manually configured root on a
+	// different drive than home, on Windows). Path is a sanitized,
+	// always-restorable fallback location under home; AbsPath is the
+	// file's real original location, tried first so a same-machine
+	// restore puts the file back where the user actually had it instead
+	// of quietly relocating it under home every time.
+	AbsPath string `json:"abs_path,omitempty"`
 }
 
 type Manifest struct {

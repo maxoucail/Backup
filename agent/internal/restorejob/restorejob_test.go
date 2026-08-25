@@ -124,3 +124,72 @@ func TestRestoreSanitizesLegacyColonInPath(t *testing.T) {
 		t.Fatalf("fichiers restaurés = %d, attendu 1", result.FileCount)
 	}
 }
+
+// A file backed up from outside home (a manually configured root on
+// another drive) must come back at its real original location on a
+// same-machine restore, not get silently relocated under home every time -
+// that's what an operator restoring right after deleting the file expects
+// to see, and where AbsPath exists precisely so restore can deliver it.
+func TestRestoreUsesOriginalAbsPathWhenAvailable(t *testing.T) {
+	home := t.TempDir()
+	otherDrive := t.TempDir() // stands in for a separate drive, e.g. "E:\"
+	originalPath := filepath.Join(otherDrive, "Projets", "rapport.docx")
+
+	f := manifestFile("_outside/E/Projets/rapport.docx", "hash-abs")
+	f.AbsPath = originalPath
+
+	srv := &fakeServer{
+		manifest:      &protocol.Manifest{Files: []protocol.ManifestFile{f}},
+		missingChunks: map[string]bool{},
+	}
+	c := srv.start(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	if _, err := Run(t.Context(), c, "snap-test", nil); err != nil {
+		t.Fatalf("restauration échouée: %v", err)
+	}
+
+	if _, err := os.Stat(originalPath); err != nil {
+		t.Fatalf("le fichier doit être restauré à son emplacement d'origine %s: %v", originalPath, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "_outside", "E", "Projets", "rapport.docx")); err == nil {
+		t.Fatal("le fichier ne doit pas être dupliqué/relocalisé sous home alors que son emplacement d'origine est disponible")
+	}
+}
+
+// When the original drive genuinely isn't available (a different machine,
+// or the drive is gone), restore must still succeed by falling back to the
+// sanitized home-relative location instead of losing the file. Blocking
+// the original path with a plain file (not a permission error, which a
+// root-run test wouldn't hit) makes MkdirAll fail for a structural reason
+// that holds regardless of privileges.
+func TestRestoreFallsBackWhenAbsPathUnavailable(t *testing.T) {
+	home := t.TempDir()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := manifestFile("_outside/E/Projets/rapport.docx", "hash-abs2")
+	f.AbsPath = filepath.Join(blocker, "Projets", "rapport.docx")
+
+	srv := &fakeServer{
+		manifest:      &protocol.Manifest{Files: []protocol.ManifestFile{f}},
+		missingChunks: map[string]bool{},
+	}
+	c := srv.start(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	result, err := Run(t.Context(), c, "snap-test", nil)
+	if err != nil {
+		t.Fatalf("restauration échouée alors qu'un repli était possible: %v", err)
+	}
+	if result.FileCount != 1 {
+		t.Fatalf("fichiers restaurés = %d, attendu 1", result.FileCount)
+	}
+	if _, err := os.Stat(filepath.Join(home, "_outside", "E", "Projets", "rapport.docx")); err != nil {
+		t.Fatalf("le fichier doit atterrir dans le repli sous home: %v", err)
+	}
+}
