@@ -497,7 +497,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 				popup.Update(p.Phase, p.Percent, p.EtaSeconds, p.UploadedBytes)
 			}
 			wsc.Send(protocol.Envelope{
-				Type: protocol.TypeProgress, Phase: p.Phase, FileCount: p.FileCount,
+				Type: protocol.TypeProgress, SnapshotID: p.SnapshotID, Phase: p.Phase, FileCount: p.FileCount,
 				LogicalBytes: p.LogicalBytes, UploadedBytes: p.UploadedBytes, Percent: p.Percent, EtaSeconds: p.EtaSeconds,
 			})
 		})

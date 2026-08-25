@@ -118,6 +118,44 @@ func TestBackupSkipsUnreadableFileAndKeepsTheRest(t *testing.T) {
 	}
 }
 
+// The panel's live progress bar depends on every progress callback after
+// snapshot creation carrying the snapshot ID: the server only persists a
+// progress update when it can attach it to a row (see ws.Hub.handleIncoming),
+// so a callback missing SnapshotID is silently dropped rather than shown.
+// Without it, the panel shows nothing until the manifest and finish calls
+// land at the very end - the whole backup looking stuck at 0% until it
+// suddenly completes.
+func TestProgressCallbacksCarryTheSnapshotID(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.txt", "un peu de contenu")
+	writeFile(t, dir, "b.txt", "un peu plus de contenu pour forcer un vrai passage upload")
+
+	srv := &fakeServer{}
+	c := srv.start(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var calls []Progress
+	onProgress := func(p Progress) { calls = append(calls, p) }
+
+	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []string{dir}, 16*1024*1024, onProgress); err != nil {
+		t.Fatalf("la sauvegarde a échoué: %v", err)
+	}
+
+	sawPostCreation := false
+	for _, p := range calls {
+		if p.Phase == "scanning" {
+			continue // before CreateSnapshot: there's genuinely no ID yet
+		}
+		sawPostCreation = true
+		if p.SnapshotID == "" {
+			t.Fatalf("callback de phase %q sans SnapshotID: le serveur ne pourra pas l'afficher en direct", p.Phase)
+		}
+	}
+	if !sawPostCreation {
+		t.Fatal("aucun callback de progression après la création de la sauvegarde: le test ne prouve rien")
+	}
+}
+
 // If nothing at all could be uploaded, reporting success would be a lie -
 // the snapshot would restore to an empty set.
 func TestBackupFailsWhenNoFileCouldBeSaved(t *testing.T) {

@@ -32,7 +32,10 @@ const uploadConcurrency = 4
 const checkChunksBatchSize = 500
 
 type Progress struct {
-	Phase         string // scanning / hashing / uploading / finalizing
+	Phase string // scanning / hashing / uploading / finalizing
+	// SnapshotID is empty during "scanning", before CreateSnapshot has run -
+	// there's no row yet for a caller to attach this progress to.
+	SnapshotID    string
 	FileCount     int
 	LogicalBytes  int64
 	UploadedBytes int64
@@ -78,7 +81,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 		return nil, fmt.Errorf("création de la sauvegarde: %w", err)
 	}
 
-	onProgress(Progress{Phase: "hashing", FileCount: len(files)})
+	onProgress(Progress{Phase: "hashing", SnapshotID: snapshotID, FileCount: len(files)})
 
 	manifest := &protocol.Manifest{Files: make([]protocol.ManifestFile, 0, len(files))}
 	var logicalBytes int64
@@ -123,7 +126,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 		}
 
 		if i%50 == 0 {
-			onProgress(Progress{Phase: "hashing", FileCount: len(files), LogicalBytes: logicalBytes})
+			onProgress(Progress{Phase: "hashing", SnapshotID: snapshotID, FileCount: len(files), LogicalBytes: logicalBytes})
 		}
 	}
 
@@ -179,7 +182,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 	var errMu sync.Mutex
 
 	if len(tasks) > 0 {
-		onProgress(Progress{Phase: "uploading", FileCount: len(files), LogicalBytes: logicalBytes})
+		onProgress(Progress{Phase: "uploading", SnapshotID: snapshotID, FileCount: len(files), LogicalBytes: logicalBytes})
 
 		taskCh := make(chan uploadTask)
 		var wg sync.WaitGroup
@@ -217,7 +220,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 						pct = 100 * float64(done) / float64(totalToUpload)
 					}
 					onProgress(Progress{
-						Phase: "uploading", FileCount: len(files), LogicalBytes: logicalBytes,
+						Phase: "uploading", SnapshotID: snapshotID, FileCount: len(files), LogicalBytes: logicalBytes,
 						UploadedBytes: done, Percent: pct, EtaSeconds: eta,
 					})
 				}
@@ -261,7 +264,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []string, chu
 		}
 	}
 
-	onProgress(Progress{Phase: "finalizing", FileCount: len(manifest.Files), LogicalBytes: logicalBytes, UploadedBytes: uploadedBytes, Percent: 100})
+	onProgress(Progress{Phase: "finalizing", SnapshotID: snapshotID, FileCount: len(manifest.Files), LogicalBytes: logicalBytes, UploadedBytes: uploadedBytes, Percent: 100})
 
 	manifest.SnapshotID = snapshotID
 	if err := c.SubmitManifest(ctx, snapshotID, manifest); err != nil {
