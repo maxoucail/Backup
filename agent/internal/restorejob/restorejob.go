@@ -6,10 +6,13 @@ package restorejob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +38,12 @@ type ProgressFunc func(Progress)
 type Result struct {
 	FileCount int
 	Bytes     int64
+	// SkippedFiles are files that couldn't be restored (missing chunk,
+	// disk error writing that one file...) while the rest of the snapshot
+	// came back fine. A restore is a live, usable filesystem the moment it
+	// finishes - failing the whole thing over one bad file would throw
+	// away every other file that restored correctly for no reason.
+	SkippedFiles []string
 }
 
 func Run(ctx context.Context, c *client.Client, snapshotID string, onProgress ProgressFunc) (*Result, error) {
@@ -59,8 +68,9 @@ func Run(ctx context.Context, c *client.Client, snapshotID string, onProgress Pr
 
 	var restoredBytes int64
 	var restoredFiles int
+	var skippedFiles []string
+	var fatalErr error
 	var mu sync.Mutex
-	var firstErr error
 	start := time.Now()
 
 	fileCh := make(chan protocol.ManifestFile)
@@ -71,10 +81,20 @@ func Run(ctx context.Context, c *client.Client, snapshotID string, onProgress Pr
 			defer wg.Done()
 			for f := range fileCh {
 				if err := restoreFile(ctx, c, home, f); err != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = fmt.Errorf("%s: %w", f.Path, err)
+					// Credentials revoked mid-restore: every remaining
+					// chunk fetch would fail too, so stop rather than
+					// grind through the whole manifest for nothing.
+					if errors.Is(err, client.ErrUnauthorized) {
+						mu.Lock()
+						if fatalErr == nil {
+							fatalErr = err
+						}
+						mu.Unlock()
+						continue
 					}
+					log.Printf("restore: fichier ignoré %s: %v", f.Path, err)
+					mu.Lock()
+					skippedFiles = append(skippedFiles, f.Path)
 					mu.Unlock()
 					continue
 				}
@@ -118,14 +138,27 @@ loop:
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if firstErr != nil {
-		return nil, firstErr
+	if fatalErr != nil {
+		return nil, fatalErr
 	}
-	return &Result{FileCount: restoredFiles, Bytes: restoredBytes}, nil
+	if restoredFiles == 0 && len(skippedFiles) > 0 {
+		return nil, fmt.Errorf("aucun fichier n'a pu être restauré (%d en échec)", len(skippedFiles))
+	}
+	return &Result{FileCount: restoredFiles, Bytes: restoredBytes, SkippedFiles: skippedFiles}, nil
 }
 
 func restoreFile(ctx context.Context, c *client.Client, home string, f protocol.ManifestFile) error {
-	dest := filepath.Join(home, filepath.FromSlash(f.Path))
+	// Defense in depth: a manifest written by an older, buggy agent could
+	// still carry a raw absolute path (e.g. a Windows drive letter, "E:")
+	// as its "relative" path. Joining that onto home would try to create a
+	// literal "E:" directory, which every Windows API rejects outright -
+	// stripping stray colons here means even a pre-existing bad manifest
+	// restores into a slightly odd but valid location instead of failing.
+	relPath := filepath.FromSlash(f.Path)
+	if strings.Contains(relPath, ":") {
+		relPath = strings.ReplaceAll(relPath, ":", "")
+	}
+	dest := filepath.Join(home, relPath)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}

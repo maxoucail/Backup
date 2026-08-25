@@ -590,6 +590,17 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			log.Printf("restauration échouée: %v", err)
 		} else {
 			log.Printf("restauration terminée: %d fichiers restaurés", result.FileCount)
+			if n := len(result.SkippedFiles); n > 0 {
+				sample := result.SkippedFiles
+				if len(sample) > 5 {
+					sample = sample[:5]
+				}
+				wsc.Send(protocol.Envelope{
+					Type: protocol.TypeLog, Level: protocol.LevelWarning,
+					Message: fmt.Sprintf("%d fichier(s) n'ont pas pu être restauré(s), par exemple : %s",
+						n, strings.Join(sample, ", ")),
+				})
+			}
 		}
 		wsc.Send(protocol.Envelope{Type: protocol.TypeRestoreFinished, SnapshotID: snapshotID, Status: status, ErrorMessage: errMsg})
 		popup.Finish(errMsg)
