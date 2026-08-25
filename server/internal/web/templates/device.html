@@ -67,6 +67,19 @@
 	</div>
 </div>
 
+<div class="modal-backdrop" id="move-modal" style="display:none;">
+	<div class="modal">
+		<h3>Déplacer cette sauvegarde vers un autre appareil</h3>
+		<p class="muted">Utile quand ce poste a été remplacé : la sauvegarde devient restaurable depuis l'appareil choisi (aucune donnée n'est retransférée, seule la propriété change). Elle disparaît de la liste de cet appareil-ci et compte désormais dans le quota de rétention de l'appareil cible.</p>
+		<label>Appareil cible</label>
+		<select class="input" id="move-target-select"></select>
+		<div class="row" style="justify-content:flex-end; margin-top:18px;">
+			<button class="btn secondary" id="move-cancel">Annuler</button>
+			<button class="btn" id="move-confirm">Déplacer</button>
+		</div>
+	</div>
+</div>
+
 <div class="modal-backdrop" id="decommission-modal" style="display:none;">
 	<div class="modal">
 		<h3>Décommissionner cet appareil</h3>
@@ -96,6 +109,9 @@ function snapshotRow(s) {
 	const deleteBtn = s.status !== "running"
 		? `<button class="btn danger small" onclick="deleteSnapshot('${s.id}')">Supprimer</button>`
 		: "";
+	const moveBtn = s.status !== "running"
+		? `<button class="btn secondary small" onclick="openMoveModal('${s.id}')">Déplacer…</button>`
+		: "";
 	const progress = s.status === "running"
 		? `<div class="progress-bar"><div style="width:${s.progress_percent}%"></div></div>`
 		: (s.status === "success" ? "100%" : "—");
@@ -106,7 +122,7 @@ function snapshotRow(s) {
 		<td>${s.file_count}</td>
 		<td>${size}</td>
 		<td style="min-width:100px;">${progress}</td>
-		<td>${restoreBtn} ${deleteBtn}</td>
+		<td>${restoreBtn} ${moveBtn} ${deleteBtn}</td>
 	</tr>`;
 }
 
@@ -118,6 +134,41 @@ function openRestoreModal(snapshotId) {
 	pendingRestoreSnapshotId = snapshotId;
 	document.getElementById("restore-modal").style.display = "flex";
 }
+
+let pendingMoveSnapshotId = null;
+
+async function openMoveModal(snapshotId) {
+	pendingMoveSnapshotId = snapshotId;
+	const select = document.getElementById("move-target-select");
+	select.innerHTML = `<option value="">Chargement…</option>`;
+	document.getElementById("move-modal").style.display = "flex";
+	try {
+		const devices = (await api("GET", "/api/devices")).filter(d => d.id !== deviceId);
+		if (devices.length === 0) {
+			select.innerHTML = `<option value="">Aucun autre appareil enrôlé</option>`;
+			return;
+		}
+		select.innerHTML = devices.map(d => `<option value="${d.id}">${d.name}</option>`).join("");
+	} catch (err) {
+		select.innerHTML = `<option value="">Erreur de chargement</option>`;
+		toast(err.message, "error");
+	}
+}
+document.getElementById("move-cancel").addEventListener("click", () => {
+	document.getElementById("move-modal").style.display = "none";
+});
+document.getElementById("move-confirm").addEventListener("click", async () => {
+	const targetDeviceId = document.getElementById("move-target-select").value;
+	if (!targetDeviceId) return;
+	try {
+		await api("POST", `/api/devices/${deviceId}/snapshots/${pendingMoveSnapshotId}/reassign`, { target_device_id: targetDeviceId });
+		document.getElementById("move-modal").style.display = "none";
+		toast("Sauvegarde déplacée.", "success");
+		load();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
 document.getElementById("restore-cancel").addEventListener("click", () => {
 	document.getElementById("restore-modal").style.display = "none";
 });

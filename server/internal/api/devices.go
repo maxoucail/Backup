@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -262,6 +263,62 @@ func (a *API) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request, devic
 			_, _, _ = store.GarbageCollect(remaining, storage.GraceCutoff())
 		}
 	}()
+
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
+type reassignSnapshotRequest struct {
+	TargetDeviceID string `json:"target_device_id"`
+}
+
+// handleReassignSnapshot moves a snapshot to a different device so it can
+// be restored there - the scenario this exists for is a machine that died
+// or was replaced: its last backup is still good, but a snapshot could
+// previously only ever be restored on the exact device that created it.
+// Chunks are content-addressed and already shared across the whole fleet,
+// so there's nothing to re-upload; this just repoints the snapshot's
+// ownership. Decommissioning a device deletes its snapshots outright (see
+// handleDecommissionDevice), so anything worth keeping has to be
+// reassigned first, while the old device record still exists.
+func (a *API) handleReassignSnapshot(w http.ResponseWriter, r *http.Request, deviceID, snapshotID string) {
+	snap, err := models.GetSnapshot(a.DB, snapshotID)
+	if err != nil || snap.DeviceID != deviceID {
+		writeError(w, http.StatusNotFound, "sauvegarde introuvable")
+		return
+	}
+	if snap.Status == models.SnapshotStatusRunning {
+		writeError(w, http.StatusConflict, "impossible de déplacer une sauvegarde en cours")
+		return
+	}
+
+	var req reassignSnapshotRequest
+	if err := decodeJSON(r, &req); err != nil || req.TargetDeviceID == "" {
+		writeError(w, http.StatusBadRequest, "appareil cible manquant")
+		return
+	}
+	if req.TargetDeviceID == deviceID {
+		writeError(w, http.StatusBadRequest, "l'appareil cible doit être différent de l'appareil actuel")
+		return
+	}
+	target, err := models.GetDevice(a.DB, req.TargetDeviceID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "appareil cible introuvable")
+		return
+	}
+
+	if err := models.ReassignSnapshot(a.DB, snapshotID, req.TargetDeviceID); err != nil {
+		writeError(w, http.StatusInternalServerError, "erreur serveur")
+		return
+	}
+
+	sourceName := deviceID
+	if source, err := models.GetDevice(a.DB, deviceID); err == nil {
+		sourceName = source.Name
+	}
+	_ = models.AddEvent(a.DB, &deviceID, models.EventLevelInfo,
+		fmt.Sprintf("Sauvegarde déplacée vers l'appareil %q pour restauration.", target.Name))
+	_ = models.AddEvent(a.DB, &req.TargetDeviceID, models.EventLevelInfo,
+		fmt.Sprintf("Sauvegarde reçue depuis l'appareil %q, disponible pour restauration.", sourceName))
 
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }

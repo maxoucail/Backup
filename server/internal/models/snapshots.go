@@ -100,6 +100,16 @@ func DeleteSnapshot(db *sql.DB, id string) error {
 	return err
 }
 
+// ReassignSnapshot moves a snapshot's ownership to a different device -
+// the backup's chunks are content-addressed and not device-specific, so a
+// replacement machine can restore a snapshot originally taken on the
+// machine it's replacing without re-uploading anything. It counts toward
+// the target device's own retention limit from this point on.
+func ReassignSnapshot(db *sql.DB, id, targetDeviceID string) error {
+	_, err := db.Exec(`UPDATE snapshots SET device_id = ? WHERE id = ?`, targetDeviceID, id)
+	return err
+}
+
 // AllManifestPaths returns manifest paths for every snapshot that still
 // exists (any status) across all devices - used by the chunk garbage
 // collector to know what's still referenced.

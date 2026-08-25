@@ -38,6 +38,9 @@ func (a *API) RegisterPanel(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/devices/{id}/snapshots/{snapshotId}", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
 		a.handleDeleteSnapshot(w, r, r.PathValue("id"), r.PathValue("snapshotId"))
 	}))
+	mux.HandleFunc("POST /api/devices/{id}/snapshots/{snapshotId}/reassign", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
+		a.handleReassignSnapshot(w, r, r.PathValue("id"), r.PathValue("snapshotId"))
+	}))
 
 	mux.HandleFunc("GET /api/settings", a.requireSession(a.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", a.requireSession(a.handleUpdateSettings))
