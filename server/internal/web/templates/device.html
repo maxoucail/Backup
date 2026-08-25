@@ -93,6 +93,9 @@ function snapshotRow(s) {
 	const restoreBtn = s.status === "success"
 		? `<button class="btn secondary small" onclick="openRestoreModal('${s.id}')">Restaurer</button>`
 		: "";
+	const deleteBtn = s.status !== "running"
+		? `<button class="btn danger small" onclick="deleteSnapshot('${s.id}')">Supprimer</button>`
+		: "";
 	const progress = s.status === "running"
 		? `<div class="progress-bar"><div style="width:${s.progress_percent}%"></div></div>`
 		: (s.status === "success" ? "100%" : "—");
@@ -103,7 +106,7 @@ function snapshotRow(s) {
 		<td>${s.file_count}</td>
 		<td>${size}</td>
 		<td style="min-width:100px;">${progress}</td>
-		<td>${restoreBtn}</td>
+		<td>${restoreBtn} ${deleteBtn}</td>
 	</tr>`;
 }
 
@@ -195,6 +198,17 @@ document.getElementById("policy-form").addEventListener("submit", async (e) => {
 		toast(err.message, "error");
 	}
 });
+
+async function deleteSnapshot(snapshotId) {
+	if (!confirm("Supprimer définitivement cette sauvegarde ? Cette action est irréversible.")) return;
+	try {
+		await api("DELETE", `/api/devices/${deviceId}/snapshots/${snapshotId}`);
+		toast("Sauvegarde supprimée.", "success");
+		load();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+}
 
 async function load() {
 	try {

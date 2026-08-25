@@ -223,3 +223,45 @@ func (a *API) handleCancelJob(w http.ResponseWriter, r *http.Request, id string)
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"ok": "true"})
 }
+
+// handleDeleteSnapshot removes one backup on its own, outside the usual
+// retention rotation - an operator deciding a particular snapshot is
+// pointless (a test run, one taken right before a big cleanup) shouldn't
+// have to wait for it to age out. A snapshot still running is refused: it
+// has no manifest yet, and deleting its DB row out from under an agent
+// mid-upload would strand the queue slot models.DeleteSnapshot alone
+// doesn't know to release.
+func (a *API) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request, deviceID, snapshotID string) {
+	snap, err := models.GetSnapshot(a.DB, snapshotID)
+	if err != nil || snap.DeviceID != deviceID {
+		writeError(w, http.StatusNotFound, "sauvegarde introuvable")
+		return
+	}
+	if snap.Status == models.SnapshotStatusRunning {
+		writeError(w, http.StatusConflict, "impossible de supprimer une sauvegarde en cours")
+		return
+	}
+
+	if err := storage.DeleteManifest(snap.ManifestPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "erreur serveur")
+		return
+	}
+	if err := models.DeleteSnapshot(a.DB, snapshotID); err != nil {
+		writeError(w, http.StatusInternalServerError, "erreur serveur")
+		return
+	}
+	_ = models.AddEvent(a.DB, &deviceID, models.EventLevelInfo, "Sauvegarde supprimée depuis le panneau.")
+
+	// Runs after the response is sent for the same reason as retention
+	// rotation: GC walks the whole chunk store, which can take a while on
+	// a large repository and shouldn't make the delete button hang.
+	go func() {
+		store := a.Store.Get()
+		remaining, err := models.AllManifestPaths(a.DB)
+		if err == nil {
+			_, _, _ = store.GarbageCollect(remaining, storage.GraceCutoff())
+		}
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
