@@ -153,17 +153,18 @@ func TestRestoreUsesOriginalAbsPathWhenAvailable(t *testing.T) {
 	if _, err := os.Stat(originalPath); err != nil {
 		t.Fatalf("le fichier doit être restauré à son emplacement d'origine %s: %v", originalPath, err)
 	}
-	if _, err := os.Stat(filepath.Join(home, "_outside", "E", "Projets", "rapport.docx")); err == nil {
-		t.Fatal("le fichier ne doit pas être dupliqué/relocalisé sous home alors que son emplacement d'origine est disponible")
+	if _, err := os.Stat(filepath.Join(home, "Desktop", "_outside", "E", "Projets", "rapport.docx")); err == nil {
+		t.Fatal("le fichier ne doit pas être dupliqué/relocalisé sur le Bureau alors que son emplacement d'origine est disponible")
 	}
 }
 
 // When the original drive genuinely isn't available (a different machine,
-// or the drive is gone), restore must still succeed by falling back to the
-// sanitized home-relative location instead of losing the file. Blocking
-// the original path with a plain file (not a permission error, which a
-// root-run test wouldn't hit) makes MkdirAll fail for a structural reason
-// that holds regardless of privileges.
+// or the drive is gone), restore must still succeed by falling back to a
+// clearly-visible folder on the Desktop instead of losing the file or
+// burying it deep in the profile. Blocking the original path with a plain
+// file (not a permission error, which a root-run test wouldn't hit) makes
+// MkdirAll fail for a structural reason that holds regardless of
+// privileges.
 func TestRestoreFallsBackWhenAbsPathUnavailable(t *testing.T) {
 	home := t.TempDir()
 	blocker := filepath.Join(t.TempDir(), "not-a-directory")
@@ -189,7 +190,7 @@ func TestRestoreFallsBackWhenAbsPathUnavailable(t *testing.T) {
 	if result.FileCount != 1 {
 		t.Fatalf("fichiers restaurés = %d, attendu 1", result.FileCount)
 	}
-	if _, err := os.Stat(filepath.Join(home, "_outside", "E", "Projets", "rapport.docx")); err != nil {
-		t.Fatalf("le fichier doit atterrir dans le repli sous home: %v", err)
+	if _, err := os.Stat(filepath.Join(home, "Desktop", "_outside", "E", "Projets", "rapport.docx")); err != nil {
+		t.Fatalf("le fichier doit atterrir dans le repli sur le Bureau: %v", err)
 	}
 }

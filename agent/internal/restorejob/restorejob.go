@@ -1,7 +1,10 @@
 // Package restorejob reconstructs a snapshot's files back onto disk,
 // downloading only each distinct chunk once even if it's shared by
-// several files, and restoring into the same relative location under the
-// user's home directory the files were originally backed up from.
+// several files. A file backed up from under home restores to that same
+// relative location; a file backed up from elsewhere (a manually
+// configured root on another drive) restores to its real original
+// location when that drive is still present, or otherwise into a
+// clearly-labelled folder on the Desktop mirroring where it used to be.
 package restorejob
 
 import (
@@ -17,7 +20,9 @@ import (
 	"time"
 
 	"backup-agent/internal/client"
+	"backup-agent/internal/knownfolders"
 	"backup-agent/internal/protocol"
+	"backup-agent/internal/scanner"
 	"backup-agent/internal/userctx"
 )
 
@@ -147,30 +152,41 @@ loop:
 	return &Result{FileCount: restoredFiles, Bytes: restoredBytes, SkippedFiles: skippedFiles}, nil
 }
 
-// homeRelativeDest is the always-restorable fallback destination: under
-// home, using the sanitized relative path. Defense in depth on top of that
-// sanitization - a manifest written by an older, buggy agent could still
-// carry a raw absolute path (e.g. a Windows drive letter, "E:") as its
-// "relative" path, and joining that onto home would try to create a
-// literal "E:" directory, which every Windows API rejects outright.
-func homeRelativeDest(home string, f protocol.ManifestFile) string {
+// fallbackDest is the always-restorable destination for a file that can't
+// go back to its real original location - either because it never had an
+// AbsPath to try (a manifest from an older agent) or because that drive
+// isn't available on this machine. Landing it deep inside the profile
+// under home would make it easy to lose track of; a clearly-named folder
+// on the Desktop, mirroring the original location as a subfolder path
+// (e.g. Desktop/_outside/E/Projets/rapport.docx), is somewhere the user
+// will actually see it and can file away by hand.
+//
+// Also defends against a manifest written by an even older, buggier agent
+// that could carry a raw absolute path (e.g. a Windows drive letter, "E:")
+// as its "relative" path outright: joining that onto anything would try to
+// create a literal "E:" directory, which every Windows API rejects.
+func fallbackDest(f protocol.ManifestFile) string {
 	relPath := filepath.FromSlash(f.Path)
 	if strings.Contains(relPath, ":") {
 		relPath = strings.ReplaceAll(relPath, ":", "")
 	}
-	return filepath.Join(home, relPath)
+	return filepath.Join(knownfolders.Resolve("Desktop"), relPath)
 }
 
 func restoreFile(ctx context.Context, c *client.Client, home string, f protocol.ManifestFile) error {
-	dest := homeRelativeDest(home, f)
+	var dest string
+	if scanner.IsOutsideHome(f.Path) || strings.Contains(f.Path, ":") {
+		dest = fallbackDest(f)
+	} else {
+		dest = filepath.Join(home, filepath.FromSlash(f.Path))
+	}
 	if f.AbsPath != "" {
 		// The file lived outside home when backed up (a manually
 		// configured root on another drive than home). Try putting it
 		// back exactly where it was - same machine, same drive still
-		// present - before falling back to the home-relative location:
-		// silently relocating every such file under home on every
-		// restore, even when the original spot is right there, is more
-		// surprising than useful.
+		// present - before falling back to the Desktop location: silently
+		// relocating every such file even when the original spot is
+		// right there is more surprising than useful.
 		if err := os.MkdirAll(filepath.Dir(f.AbsPath), 0o755); err == nil {
 			dest = f.AbsPath
 		}
