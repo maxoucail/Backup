@@ -142,12 +142,8 @@ func uninstallSelf() error {
 	}
 }
 
-func setupLogging() {
-	dir, err := config.Dir()
-	if err != nil {
-		return
-	}
-	f, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+func setupLogging(dir string) {
+	f, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return
 	}
@@ -160,7 +156,9 @@ func setupLogging() {
 // resolve the console user's home directory instead of its own, and cross
 // into that user's session to show anything on screen.
 func runServiceMode(ctx context.Context) {
-	setupLogging()
+	if dir, err := config.ServiceLogDir(); err == nil {
+		setupLogging(dir)
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		log.Fatalf("chemin de l'exécutable introuvable: %v", err)
@@ -217,7 +215,9 @@ func ensureTrayHelperRunning(ctx context.Context, exePath string) {
 // the Linux fallback. It keeps the original per-user autostart behaviour
 // so a plain double-click / systemd --user unit still works standalone.
 func runForeground(ctx context.Context) {
-	setupLogging()
+	if dir, err := config.Dir(); err == nil {
+		setupLogging(dir)
+	}
 	if exePath, err := os.Executable(); err == nil {
 		if err := autostart.Ensure(exePath); err != nil {
 			log.Printf("avertissement: démarrage automatique non configuré: %v", err)
