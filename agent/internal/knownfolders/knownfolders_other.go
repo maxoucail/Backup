@@ -9,9 +9,13 @@ import (
 	"backup-agent/internal/userctx"
 )
 
-// UserSID is a no-op on this platform; it exists only so main.go can set
-// it unconditionally without per-OS build tags of its own.
-var UserSID string
+// UserSID and UserSIDFunc are no-ops on this platform; they exist only so
+// main.go can set them unconditionally without per-OS build tags of its
+// own. There is no per-user registry hive to pick here.
+var (
+	UserSID     string
+	UserSIDFunc func() (string, error)
+)
 
 var errEmptyHome = errors.New("répertoire utilisateur vide")
 

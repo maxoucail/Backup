@@ -277,9 +277,20 @@ func IsOutsideHome(relPath string) bool {
 func ResolveKnownFolders() map[string]string {
 	out := make(map[string]string, len(defaultFolderNames))
 	for _, name := range defaultFolderNames {
-		if p, err := knownfolders.ResolveErr(name); err == nil && p != "" && filepath.IsAbs(p) {
-			out[name] = p
+		p, err := knownfolders.ResolveErr(name)
+		if err != nil || p == "" || !filepath.IsAbs(p) {
+			continue
 		}
+		// A folder that resolved into a service account's own profile is
+		// a wrong answer, not a usable one: those files would be
+		// invisible to the user. Dropping it here means the restore
+		// treats the folder as unresolved and falls back to somewhere
+		// real, instead of writing into the void.
+		if knownfolders.IsServiceProfilePath(p) {
+			log.Printf("scanner: dossier %q résolu dans le profil d'un compte de service (%s), ignoré", name, p)
+			continue
+		}
+		out[name] = p
 	}
 	return out
 }

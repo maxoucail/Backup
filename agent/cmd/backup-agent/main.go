@@ -167,10 +167,15 @@ func runServiceMode(ctx context.Context) {
 	switch runtime.GOOS {
 	case "windows":
 		userctx.HomeDir = winsession.ConsoleUserHomeDir
+		// Re-resolved on every lookup, not captured once here: the service
+		// starts at boot with nobody logged in, so a one-shot value stays
+		// empty for the whole service lifetime and every registry read
+		// silently falls back to the SYSTEM hive.
+		knownfolders.UserSIDFunc = winsession.ConsoleUserSID
 		if sid, err := winsession.ConsoleUserSID(); err == nil {
 			knownfolders.UserSID = sid
 		} else {
-			log.Printf("avertissement: SID de l'utilisateur console introuvable, détection des dossiers redirigés désactivée: %v", err)
+			log.Printf("aucune session utilisateur au démarrage du service (%v) : le SID sera résolu à la première session ouverte", err)
 		}
 		osui.ShowURL = func(url string) error {
 			return winsession.LaunchInConsoleSession(exePath, []string{"--show-url", url})

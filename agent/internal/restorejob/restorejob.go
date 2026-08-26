@@ -28,6 +28,7 @@ import (
 
 	"backup-agent/internal/client"
 	"backup-agent/internal/config"
+	"backup-agent/internal/knownfolders"
 	"backup-agent/internal/protocol"
 	"backup-agent/internal/scanner"
 	"backup-agent/internal/userctx"
@@ -92,7 +93,7 @@ type Locations struct {
 func ResolveLocations(cfg *config.Config) (*Locations, error) {
 	live := scanner.ResolveKnownFolders()
 	home, homeErr := userctx.HomeDir()
-	if homeErr != nil || home == "" || !filepath.IsAbs(home) {
+	if homeErr != nil || home == "" || !filepath.IsAbs(home) || knownfolders.IsServiceProfilePath(home) {
 		home = ""
 	}
 
@@ -105,11 +106,29 @@ func ResolveLocations(cfg *config.Config) (*Locations, error) {
 		log.Print("restore: résolution des dossiers utilisateur impossible maintenant, utilisation des chemins de la dernière sauvegarde réussie")
 		folders := make(map[string]string, len(cfg.LastKnownFolders))
 		for name, p := range cfg.LastKnownFolders {
-			if p != "" && filepath.IsAbs(p) {
-				folders[name] = p
+			// Cached paths get the same scrutiny as freshly resolved ones:
+			// an agent build older than the service-profile guard could
+			// have recorded SYSTEM's folders here, and replaying those
+			// would recreate the very failure this fixes.
+			if p == "" || !filepath.IsAbs(p) {
+				continue
 			}
+			if knownfolders.IsServiceProfilePath(p) {
+				log.Printf("restore: chemin mémorisé %q ignoré (profil d'un compte de service)", p)
+				continue
+			}
+			folders[name] = p
 		}
-		return &Locations{Home: cfg.LastKnownHome, KnownFolders: folders, FromLastBackup: true}, nil
+		cachedHome := cfg.LastKnownHome
+		if knownfolders.IsServiceProfilePath(cachedHome) {
+			cachedHome = ""
+		}
+		if len(folders) == 0 && cachedHome == "" {
+			return nil, fmt.Errorf("impossible de déterminer les dossiers de l'utilisateur sur ce poste " +
+				"(aucune session ouverte, et les chemins mémorisés sont inutilisables) : " +
+				"ouvrez une session sur la machine, lancez une sauvegarde, puis relancez la restauration")
+		}
+		return &Locations{Home: cachedHome, KnownFolders: folders, FromLastBackup: true}, nil
 	}
 
 	return nil, fmt.Errorf("impossible de déterminer les dossiers de l'utilisateur sur ce poste " +

@@ -23,11 +23,36 @@ import (
 	"backup-agent/internal/userctx"
 )
 
-// UserSID, when set, makes Resolve read HKEY_USERS\<UserSID>\... instead of
-// HKEY_CURRENT_USER. Set by main.go when running as a LocalSystem service:
-// HKEY_CURRENT_USER inside that process is LocalSystem's own hive, not the
-// console user's, so it would silently resolve nothing useful there.
+// UserSID, when set, makes Resolve read HKEY_USERS\<UserSID>\... instead
+// of HKEY_CURRENT_USER. Set by main.go when running as a LocalSystem
+// service: HKEY_CURRENT_USER inside that process is LocalSystem's own
+// hive, not the console user's, so it would silently resolve that account's
+// folders instead - which is how restored files ended up in
+// C:\Windows\System32\config\systemprofile where nobody could find them.
 var UserSID string
+
+// UserSIDFunc, when set, re-resolves the console user's SID on demand.
+//
+// A one-shot UserSID set at startup is not enough, and getting this wrong
+// is exactly what sent restores into the void: the service starts at boot,
+// when nobody is logged in yet, so the initial lookup fails and UserSID
+// stays empty for the entire life of the service. Every later registry
+// read then silently falls back to HKEY_CURRENT_USER - the SYSTEM hive -
+// and returns SYSTEM's folder paths, no matter who logged in afterwards.
+// Re-resolving per lookup means the first user to log in after boot is
+// picked up straight away.
+var UserSIDFunc func() (string, error)
+
+// currentUserSID prefers a freshly resolved SID, falling back to whatever
+// was captured at startup.
+func currentUserSID() string {
+	if UserSIDFunc != nil {
+		if sid, err := UserSIDFunc(); err == nil && sid != "" {
+			return sid
+		}
+	}
+	return UserSID
+}
 
 // registryName maps our folder names to the value name under
 // User Shell Folders. Downloads has no classic name - only the CLSID form.
@@ -109,11 +134,16 @@ func ResolveErr(name string) (string, error) {
 		return fallback, nil
 	}
 
+	// Read the *user's* hive whenever we know which one it is. Falling
+	// through to HKEY_CURRENT_USER inside a LocalSystem service reads
+	// SYSTEM's own hive and yields SYSTEM's folders, so only do that when
+	// there's genuinely no user SID - and even then, the guard below
+	// catches the bad answer.
 	root := registry.CURRENT_USER
 	subKey := `Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders`
-	if UserSID != "" {
+	if sid := currentUserSID(); sid != "" {
 		root = registry.USERS
-		subKey = UserSID + `\` + subKey
+		subKey = sid + `\` + subKey
 	}
 
 	k, err := registry.OpenKey(root, subKey, registry.QUERY_VALUE)
@@ -128,6 +158,14 @@ func ResolveErr(name string) (string, error) {
 	}
 	resolved := filepath.Clean(expandEnv(raw))
 	if resolved == "" || resolved == "." {
+		return fallback, nil
+	}
+	// Last line of defence against a wrong-hive read: the registry just
+	// told us this user's folder lives inside a service account's profile.
+	// It doesn't - that answer came from SYSTEM's hive - and honouring it
+	// is precisely what makes restored files vanish somewhere the user
+	// can't see. The user's own profile is the trustworthy answer here.
+	if IsServiceProfilePath(resolved) && !IsServiceProfilePath(home) {
 		return fallback, nil
 	}
 	return resolved, nil

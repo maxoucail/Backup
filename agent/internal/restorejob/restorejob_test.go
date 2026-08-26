@@ -360,3 +360,51 @@ func TestRestoreRejectsFileWithWrongSize(t *testing.T) {
 		t.Fatal("aucun fichier incomplet ne doit rester sur le disque")
 	}
 }
+
+// The bug that made restores land in the void on Windows: the service
+// starts at boot with nobody logged in, so the user's SID is never
+// resolved and every registry read falls through to the SYSTEM hive,
+// which answers with C:\Windows\System32\config\systemprofile\... A
+// destination inside a service account's profile must be rejected however
+// it was arrived at - including from paths cached by an older agent build
+// that recorded them before this guard existed.
+func TestRestoreNeverWritesIntoAServiceAccountProfile(t *testing.T) {
+	poisoned := filepath.Join(t.TempDir(), "Windows", "System32", "config", "systemprofile")
+	realUserHome := t.TempDir()
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	loc, err := ResolveLocations(&config.Config{
+		LastKnownHome: realUserHome,
+		LastKnownFolders: map[string]string{
+			// What an older build could have cached from a wrong-hive read.
+			"Downloads": filepath.Join(poisoned, "Downloads"),
+			"Desktop":   filepath.Join(realUserHome, "Desktop"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("résolution: %v", err)
+	}
+
+	srv := &fakeServer{
+		manifest: &protocol.Manifest{Files: []protocol.ManifestFile{
+			manifestFile("Downloads/facture.pdf", "hash-poison"),
+		}},
+		missingChunks: map[string]bool{},
+	}
+	c := srv.start(t)
+
+	result, err := Run(t.Context(), c, "snap-test", loc, nil)
+	if err != nil {
+		t.Fatalf("restauration échouée: %v", err)
+	}
+	for _, d := range result.Destinations {
+		if strings.Contains(strings.ToLower(d), "systemprofile") {
+			t.Fatalf("un fichier a été restauré dans le profil d'un compte de service: %s", d)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(poisoned, "Downloads", "facture.pdf")); err == nil {
+		t.Fatal("aucun fichier ne doit atterrir sous systemprofile")
+	}
+}
