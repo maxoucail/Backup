@@ -1,14 +1,23 @@
 // Package scanner enumerates the files a backup run should consider:
 // either the operator's default set of well-known user folders (Desktop,
-// Downloads, Documents, Pictures - present under the user's home directory
-// on Windows, macOS and Linux alike) or a custom list pushed from the
-// panel.
+// Downloads, Documents, Pictures) or a custom list pushed from the panel.
+//
+// Files from a well-known folder are recorded in the manifest under that
+// folder's *logical* name ("Downloads/facture.pdf"), never its physical
+// location. On Windows those folders are routinely redirected to another
+// drive, so the physical location is a property of one machine at one
+// moment in time - useless, and actively harmful, as the thing to restore
+// against. Keeping the logical name means a restore just re-resolves
+// "Downloads" on the target machine (registry lookup, see the
+// knownfolders package) and puts the file back in that user's real
+// Downloads folder, wherever it happens to live now.
 package scanner
 
 import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -34,46 +43,106 @@ var excludedDirNames = map[string]bool{
 	".fseventsd":                true,
 }
 
+// Root is one directory to walk, plus the logical name its files should be
+// recorded under. Name is one of defaultFolderNames for a well-known user
+// folder - the case where the physical path must not end up in the
+// manifest - and empty for an arbitrary operator-configured path, which
+// has no logical identity to restore against and falls back to a
+// home-relative (or, failing that, absolute) path.
+type Root struct {
+	Path string
+	Name string
+}
+
 // DefaultRoots returns the standard per-user folders to back up, resolved
 // to their real current location - which on Windows may well not be under
 // the home directory at all, if the user (or their IT department) moved
 // one to another drive via the folder's Properties > Location tab.
 // Non-existent folders (e.g. a fresh account with no Pictures folder yet)
 // are silently skipped rather than treated as an error.
-func DefaultRoots() []string {
-	var roots []string
+func DefaultRoots() []Root {
+	var roots []Root
 	for _, name := range defaultFolderNames {
 		p := knownfolders.Resolve(name)
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
-			roots = append(roots, p)
+			roots = append(roots, Root{Path: p, Name: name})
 		}
 	}
 	return roots
 }
 
 // ResolveRoots turns the operator-configured path list (which may contain
-// bare folder names like "Desktop" relative to the home directory, or full
-// absolute paths for something like an external project folder) into
-// absolute paths. An empty list means "use the defaults".
-func ResolveRoots(configured []string) []string {
+// bare folder names like "Desktop", or full absolute paths for something
+// like an external project folder) into roots. An empty list means "use
+// the defaults".
+//
+// A configured entry is matched against the well-known folders both by
+// name and by resolved path, so "Downloads", "C:\Users\x\Downloads" and
+// "E:\Downloads" (a redirected one) all produce the same logical root -
+// an operator pinning down an exact path in the panel shouldn't
+// accidentally lose the folder identity that makes restores land in the
+// right place.
+func ResolveRoots(configured []string) []Root {
 	if len(configured) == 0 {
 		return DefaultRoots()
 	}
 	home, _ := userctx.HomeDir()
-	var roots []string
+	var roots []Root
 	for _, p := range configured {
-		if filepath.IsAbs(p) {
-			roots = append(roots, filepath.Clean(p))
+		p = strings.TrimSpace(p)
+		if p == "" {
 			continue
 		}
-		roots = append(roots, filepath.Join(home, p))
+		if name, ok := matchKnownFolderName(p); ok {
+			roots = append(roots, Root{Path: knownfolders.Resolve(name), Name: name})
+			continue
+		}
+		abs := p
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(home, abs)
+		}
+		abs = filepath.Clean(abs)
+		roots = append(roots, Root{Path: abs, Name: matchKnownFolderPath(abs)})
 	}
 	return roots
 }
 
+// matchKnownFolderName recognises a bare folder name, case-insensitively
+// ("downloads" -> "Downloads").
+func matchKnownFolderName(s string) (string, bool) {
+	for _, name := range defaultFolderNames {
+		if strings.EqualFold(s, name) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// matchKnownFolderPath returns the logical name of the well-known folder
+// currently living at abs, or "" if it isn't one.
+func matchKnownFolderPath(abs string) string {
+	for _, name := range defaultFolderNames {
+		if pathsEqual(knownfolders.Resolve(name), abs) {
+			return name
+		}
+	}
+	return ""
+}
+
+// pathsEqual compares two absolute paths. Windows paths are
+// case-insensitive and both separators are legal there, so compare on a
+// normalised form rather than byte-for-byte.
+func pathsEqual(a, b string) bool {
+	return strings.EqualFold(filepath.ToSlash(filepath.Clean(a)), filepath.ToSlash(filepath.Clean(b)))
+}
+
 type FileEntry struct {
 	AbsPath string
-	RelPath string // relative to the user's home directory, forward-slash separated
+	// RelPath is where this file is recorded in the manifest, forward-slash
+	// separated: "<logical folder>/<path within it>" for a well-known
+	// folder, a home-relative path otherwise, or the _outside fallback when
+	// it's neither.
+	RelPath string
 	Size    int64
 	ModTime int64 // unix seconds
 }
@@ -82,13 +151,13 @@ type FileEntry struct {
 // individual entries (permission denied, a file vanishing mid-walk) are
 // logged and skipped rather than aborting the whole backup - a single
 // locked file should never fail an otherwise-successful run.
-func Walk(roots []string) []FileEntry {
+func Walk(roots []Root) []FileEntry {
 	home, _ := userctx.HomeDir()
 	seen := make(map[string]bool)
 	var out []FileEntry
 
 	for _, root := range roots {
-		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		_ = filepath.WalkDir(root.Path, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				log.Printf("scanner: skipping %s: %v", p, err)
 				return nil
@@ -119,7 +188,7 @@ func Walk(roots []string) []FileEntry {
 
 			out = append(out, FileEntry{
 				AbsPath: abs,
-				RelPath: relPath(home, abs),
+				RelPath: relPath(root, home, abs),
 				Size:    info.Size(),
 				ModTime: info.ModTime().Unix(),
 			})
@@ -134,11 +203,11 @@ func Walk(roots []string) []FileEntry {
 // signature of a missing "Full Disk Access" grant (Desktop/Documents/
 // Downloads/Pictures are TCC-protected since Catalina, and no installer
 // can pre-grant that on the user's behalf).
-func CheckAccess(roots []string) []string {
+func CheckAccess(roots []Root) []string {
 	var blocked []string
 	for _, root := range roots {
-		if _, err := os.ReadDir(root); err != nil && os.IsPermission(err) {
-			blocked = append(blocked, root)
+		if _, err := os.ReadDir(root.Path); err != nil && os.IsPermission(err) {
+			blocked = append(blocked, root.Path)
 		}
 	}
 	return blocked
@@ -148,25 +217,31 @@ func isOutside(rel string) bool {
 	return len(rel) >= 2 && rel[0] == '.' && rel[1] == '.'
 }
 
-// relPath turns an absolute file path into the path stored in the
-// manifest and later used to reconstruct the file on restore. When abs is
-// under home this is the ordinary relative path; anything else - a
-// manually configured root on a different Windows drive than home, or any
-// other absolute path filepath.Rel can't relate to home - is namespaced
-// under "_outside" instead of leaking the raw absolute path.
-//
-// Leaking it is not just untidy: on Windows filepath.Rel returns an error
-// for two paths on different volumes, so the naive fallback used to be the
-// raw absolute path itself (e.g. "E:\$RECYCLE.BIN\...\desktop.ini"). At
-// restore time that gets joined onto the home directory - not resolved as
-// a fresh root, just string-glued - producing a literal "E:" path segment,
-// which every Windows API refused to create ("La syntaxe du nom de
-// fichier... est incorrecte"). sanitizeSegment strips the colon so the
-// exact same file still restores, just under a folder named "E" instead of
-// pretending to be a second drive letter mid-path.
 const outsideHomePrefix = "_outside/"
 
-func relPath(home, abs string) string {
+// relPath decides how a file is recorded in the manifest.
+//
+// A file from a well-known folder is stored under that folder's logical
+// name, so its physical location never enters the manifest at all and a
+// restore can re-resolve the folder on whatever machine it runs on.
+//
+// Otherwise it's stored relative to home. Only a file that is neither -
+// an operator-configured path outside the home directory - falls back to
+// the "_outside" namespace. That fallback exists because on Windows
+// filepath.Rel returns an error for two paths on different volumes, so
+// the naive result would be the raw absolute path itself (e.g.
+// "E:\Projets\x.txt"), which at restore time gets joined onto a directory
+// rather than resolved as a fresh root, producing a literal "E:" path
+// segment that every Windows API rejects ("La syntaxe du nom de
+// fichier... est incorrecte"). sanitizeSegment strips the colon so such a
+// file still restores somewhere valid; backupjob additionally records its
+// real AbsPath so restore can prefer the original location when it exists.
+func relPath(root Root, home, abs string) string {
+	if root.Name != "" {
+		if r, err := filepath.Rel(root.Path, abs); err == nil && !isOutside(r) {
+			return path.Join(root.Name, filepath.ToSlash(r))
+		}
+	}
 	if home != "" {
 		if r, err := filepath.Rel(home, abs); err == nil && !isOutside(r) {
 			return filepath.ToSlash(r)
@@ -176,12 +251,48 @@ func relPath(home, abs string) string {
 }
 
 // IsOutsideHome reports whether a RelPath produced by Walk is the
-// _outside-namespaced fallback rather than an ordinary path relative to
-// home - the signal backupjob uses to also record the file's real
+// _outside-namespaced fallback rather than a logical or home-relative
+// path - the signal backupjob uses to also record the file's real
 // original AbsPath, so restore can try putting it back where it actually
-// was instead of only ever under home.
+// was instead of only ever under a fallback directory.
 func IsOutsideHome(relPath string) bool {
 	return strings.HasPrefix(relPath, outsideHomePrefix)
+}
+
+// KnownFolderDest maps a manifest path back to an absolute destination on
+// *this* machine when its first segment names a well-known user folder:
+// "Downloads/facture.pdf" becomes this user's real Downloads folder
+// (registry-resolved on Windows, so a redirected folder is honoured) plus
+// "facture.pdf". This is what puts a restored file back where it belongs
+// even if the folder has been moved to another drive since - on this
+// machine or on the replacement machine the snapshot was moved to.
+//
+// Returns ok=false for a path that doesn't start with a known folder,
+// leaving the caller to decide where it goes.
+func KnownFolderDest(manifestPath string) (string, bool) {
+	clean := path.Clean(filepath.ToSlash(manifestPath))
+	first, rest, _ := strings.Cut(clean, "/")
+	name, ok := matchKnownFolderName(first)
+	if !ok {
+		return "", false
+	}
+	dir := knownfolders.Resolve(name)
+	if rest == "" {
+		return dir, true
+	}
+	// filepath.Join cleans the remainder, so a "../" smuggled into a
+	// manifest can't climb out of the resolved folder.
+	dest := filepath.Join(dir, filepath.FromSlash(rest))
+	if !within(dir, dest) {
+		return "", false
+	}
+	return dest, true
+}
+
+// within reports whether dest stays inside dir.
+func within(dir, dest string) bool {
+	rel, err := filepath.Rel(dir, dest)
+	return err == nil && !isOutside(rel)
 }
 
 // sanitizeSegment strips characters that are illegal inside a path

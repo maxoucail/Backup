@@ -73,6 +73,15 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
   pour sauvegarder le bon dossier plutôt que de supposer qu'il est resté
   sous `C:\Users\...`. On peut aussi forcer des chemins précis par
   appareil depuis le panneau, y compris sur un autre disque.
+- **Restauration par emplacement logique** : un fichier est enregistré
+  sous le nom de son dossier (`Téléchargements/facture.pdf`), jamais sous
+  son emplacement physique. À la restauration, l'agent relit le registre
+  de la machine cible et remet le fichier dans le vrai dossier
+  Téléchargements de cet utilisateur — même s'il a été déplacé sur un
+  autre disque depuis, et même s'il s'agit d'une autre machine (voir
+  « déplacer une sauvegarde » ci-dessous). Seuls les chemins
+  personnalisés hors dossiers utilisateur, dont le disque n'existe plus,
+  atterrissent dans un dossier visible sur le Bureau.
 - **Icône dans la barre des tâches (Windows)** : affiche la date de la
   dernière sauvegarde et permet de sauvegarder maintenant ou de
   reprogrammer la prochaine sauvegarde - sans jamais bloquer un

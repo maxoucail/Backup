@@ -125,6 +125,40 @@ func TestRestoreSanitizesLegacyColonInPath(t *testing.T) {
 	}
 }
 
+// The headline behaviour: a file backed up from a well-known folder goes
+// back into that folder as it exists on the restoring machine, even when
+// the manifest also carries an AbsPath pointing somewhere else entirely
+// (the folder's location on the machine that took the backup). Restoring
+// to that stale physical path - or to a _outside fallback - is exactly
+// what users hit as "I restored and my file didn't come back".
+func TestRestorePutsKnownFolderFileBackInThatFolder(t *testing.T) {
+	home := t.TempDir()
+	staleLocation := filepath.Join(t.TempDir(), "Downloads") // "E:\Downloads" on the old machine
+
+	f := manifestFile("Downloads/facture.pdf", "hash-known")
+	f.AbsPath = filepath.Join(staleLocation, "facture.pdf")
+
+	srv := &fakeServer{
+		manifest:      &protocol.Manifest{Files: []protocol.ManifestFile{f}},
+		missingChunks: map[string]bool{},
+	}
+	c := srv.start(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	if _, err := Run(t.Context(), c, "snap-test", nil); err != nil {
+		t.Fatalf("restauration échouée: %v", err)
+	}
+
+	want := filepath.Join(home, "Downloads", "facture.pdf")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("le fichier doit revenir dans le dossier Téléchargements de cet utilisateur (%s): %v", want, err)
+	}
+	if _, err := os.Stat(f.AbsPath); err == nil {
+		t.Fatal("le fichier ne doit pas être écrit à l'emplacement physique de l'ancienne machine")
+	}
+}
+
 // A file backed up from outside home (a manually configured root on
 // another drive) must come back at its real original location on a
 // same-machine restore, not get silently relocated under home every time -

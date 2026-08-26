@@ -1,10 +1,14 @@
 // Package restorejob reconstructs a snapshot's files back onto disk,
 // downloading only each distinct chunk once even if it's shared by
-// several files. A file backed up from under home restores to that same
-// relative location; a file backed up from elsewhere (a manually
-// configured root on another drive) restores to its real original
-// location when that drive is still present, or otherwise into a
-// clearly-labelled folder on the Desktop mirroring where it used to be.
+// several files.
+//
+// Files are put back by *logical* location: a file backed up from
+// Downloads goes into this machine's Downloads folder, re-resolved at
+// restore time (registry lookup on Windows), so a folder redirected to
+// another drive - here, or on the replacement machine a snapshot was
+// moved to - still restores to the right place. See destinationFor for
+// the full ordering, including the fallbacks for paths that never
+// belonged to a well-known folder.
 package restorejob
 
 import (
@@ -152,18 +156,18 @@ loop:
 	return &Result{FileCount: restoredFiles, Bytes: restoredBytes, SkippedFiles: skippedFiles}, nil
 }
 
-// fallbackDest is the always-restorable destination for a file that can't
-// go back to its real original location - either because it never had an
-// AbsPath to try (a manifest from an older agent) or because that drive
-// isn't available on this machine. Landing it deep inside the profile
-// under home would make it easy to lose track of; a clearly-named folder
-// on the Desktop, mirroring the original location as a subfolder path
-// (e.g. Desktop/_outside/E/Projets/rapport.docx), is somewhere the user
-// will actually see it and can file away by hand.
+// fallbackDest is the last-resort destination for a file that has no
+// logical folder to go back to and no usable original location - an
+// operator-configured path outside home whose drive isn't present on this
+// machine. Landing it deep inside the profile would make it easy to lose
+// track of; a clearly-named folder on the Desktop, mirroring the original
+// location as a subfolder path (e.g.
+// Desktop/_outside/E/Projets/rapport.docx), is somewhere the user will
+// actually see it and can file away by hand.
 //
-// Also defends against a manifest written by an even older, buggier agent
-// that could carry a raw absolute path (e.g. a Windows drive letter, "E:")
-// as its "relative" path outright: joining that onto anything would try to
+// Also defends against a manifest written by an older, buggier agent that
+// could carry a raw absolute path (e.g. a Windows drive letter, "E:") as
+// its "relative" path outright: joining that onto anything would try to
 // create a literal "E:" directory, which every Windows API rejects.
 func fallbackDest(f protocol.ManifestFile) string {
 	relPath := filepath.FromSlash(f.Path)
@@ -173,24 +177,36 @@ func fallbackDest(f protocol.ManifestFile) string {
 	return filepath.Join(knownfolders.Resolve("Desktop"), relPath)
 }
 
-func restoreFile(ctx context.Context, c *client.Client, home string, f protocol.ManifestFile) error {
-	var dest string
-	if scanner.IsOutsideHome(f.Path) || strings.Contains(f.Path, ":") {
-		dest = fallbackDest(f)
-	} else {
-		dest = filepath.Join(home, filepath.FromSlash(f.Path))
+// destinationFor decides where a manifest entry lands on this machine, in
+// order of preference:
+//
+//  1. Its well-known folder, re-resolved here and now - "Downloads/x.pdf"
+//     goes into this user's real Downloads, wherever Windows says that is.
+//     This is the case that covers essentially every backed-up file, and
+//     it deliberately ignores where the file physically sat when it was
+//     backed up: that machine's layout is not this machine's layout.
+//  2. Its recorded original absolute path, when the entry has one and that
+//     location is creatable - a configured path outside home, restored on
+//     the same machine with the same drive still attached.
+//  3. Home-relative, for an ordinary path that named no known folder.
+//  4. The Desktop fallback above.
+func destinationFor(home string, f protocol.ManifestFile) string {
+	if dest, ok := scanner.KnownFolderDest(f.Path); ok {
+		return dest
 	}
 	if f.AbsPath != "" {
-		// The file lived outside home when backed up (a manually
-		// configured root on another drive than home). Try putting it
-		// back exactly where it was - same machine, same drive still
-		// present - before falling back to the Desktop location: silently
-		// relocating every such file even when the original spot is
-		// right there is more surprising than useful.
 		if err := os.MkdirAll(filepath.Dir(f.AbsPath), 0o755); err == nil {
-			dest = f.AbsPath
+			return f.AbsPath
 		}
 	}
+	if scanner.IsOutsideHome(f.Path) || strings.Contains(f.Path, ":") {
+		return fallbackDest(f)
+	}
+	return filepath.Join(home, filepath.FromSlash(f.Path))
+}
+
+func restoreFile(ctx context.Context, c *client.Client, home string, f protocol.ManifestFile) error {
+	dest := destinationFor(home, f)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}

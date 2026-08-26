@@ -459,7 +459,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		return lastBackupAt, lastBackupStatus
 	}
 
-	warnIfBlocked := func(roots []string) {
+	warnIfBlocked := func(roots []scanner.Root) {
 		blocked := scanner.CheckAccess(roots)
 		if len(blocked) == 0 {
 			return

@@ -13,6 +13,7 @@ import (
 
 	"backup-agent/internal/client"
 	"backup-agent/internal/protocol"
+	"backup-agent/internal/scanner"
 )
 
 // fakeServer stands in for the backup server, letting a test decide which
@@ -92,7 +93,7 @@ func TestBackupSkipsUnreadableFileAndKeepsTheRest(t *testing.T) {
 	// Isolate the manifest cache from the developer's real one.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	res, err := Run(context.Background(), c, protocol.SnapshotKindManual, []string{dir}, 16*1024*1024, nil)
+	res, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, 16*1024*1024, nil)
 	if err != nil {
 		t.Fatalf("la sauvegarde a échoué alors qu'un seul fichier posait problème: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestProgressCallbacksCarryTheSnapshotID(t *testing.T) {
 		calls = append(calls, p)
 	}
 
-	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []string{dir}, 16*1024*1024, onProgress); err != nil {
+	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, 16*1024*1024, onProgress); err != nil {
 		t.Fatalf("la sauvegarde a échoué: %v", err)
 	}
 
@@ -173,7 +174,7 @@ func TestBackupFailsWhenNoFileCouldBeSaved(t *testing.T) {
 	c := srv.start(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []string{dir}, 16*1024*1024, nil); err == nil {
+	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, 16*1024*1024, nil); err == nil {
 		t.Fatal("une sauvegarde dont aucun fichier n'a pu être envoyé doit échouer")
 	}
 	if srv.finishStatus != protocol.SnapshotStatusFailed {

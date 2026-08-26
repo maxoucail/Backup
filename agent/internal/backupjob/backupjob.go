@@ -56,7 +56,7 @@ type Result struct {
 	SkippedFiles []string
 }
 
-func Run(ctx context.Context, c *client.Client, kind string, roots []string, chunkSize int64, onProgress ProgressFunc) (*Result, error) {
+func Run(ctx context.Context, c *client.Client, kind string, roots []scanner.Root, chunkSize int64, onProgress ProgressFunc) (*Result, error) {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
