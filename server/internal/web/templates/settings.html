@@ -25,8 +25,16 @@
 					<div id="test-storage-result" style="margin-top:6px; font-size:.82rem;"></div>
 					<div class="muted" style="font-size:.8rem; margin-top:4px;">Changer ce chemin ne migre pas les données existantes.</div>
 
-					<label>Intervalle de sauvegarde par défaut (minutes)</label>
-					<input class="input" id="default-interval" type="number" min="5" required>
+					<label>Intervalle de sauvegarde par défaut</label>
+					<div class="row">
+						<input class="input" id="default-interval" type="number" min="1" required style="flex:1;">
+						<select class="input" id="default-interval-unit" style="flex:0 0 auto; width:auto;">
+							<option value="1">minutes</option>
+							<option value="60">heures</option>
+							<option value="1440">jours</option>
+						</select>
+					</div>
+					<div class="muted" style="font-size:.8rem; margin-top:4px;">Ex: pour une sauvegarde par semaine, mettez 7 et choisissez « jours ». Minimum 5 minutes.</div>
 
 					<label>Nombre de sauvegardes à conserver par défaut</label>
 					<input class="input" id="default-retention" type="number" min="1" required>
@@ -115,10 +123,26 @@
 document.getElementById("sidebar-slot").outerHTML = renderSidebar("settings");
 wireLogout();
 
+// setIntervalDisplay picks the coarsest unit (days > hours > minutes) that
+// still shows the stored value as a whole number, so a weekly interval
+// reads as "7 jours" instead of "10080 minutes".
+function setIntervalDisplay(minutes) {
+	const units = [1440, 60, 1];
+	const unit = units.find(u => minutes % u === 0) || 1;
+	document.getElementById("default-interval").value = minutes / unit;
+	document.getElementById("default-interval-unit").value = unit;
+}
+
+function intervalMinutesFromForm() {
+	const value = parseInt(document.getElementById("default-interval").value, 10);
+	const unit = parseInt(document.getElementById("default-interval-unit").value, 10);
+	return value * unit;
+}
+
 async function loadSettings() {
 	const s = await api("GET", "/api/settings");
 	document.getElementById("storage-root").value = s.storage_root;
-	document.getElementById("default-interval").value = s.default_interval_minutes;
+	setIntervalDisplay(s.default_interval_minutes);
 	document.getElementById("default-retention").value = s.default_retention_count;
 	document.getElementById("max-concurrent").value = s.max_concurrent_backups;
 	document.getElementById("event-days").value = s.event_retention_days;
@@ -152,7 +176,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
 	try {
 		await api("PUT", "/api/settings", {
 			storage_root: document.getElementById("storage-root").value,
-			default_interval_minutes: parseInt(document.getElementById("default-interval").value, 10),
+			default_interval_minutes: intervalMinutesFromForm(),
 			default_retention_count: parseInt(document.getElementById("default-retention").value, 10),
 			max_concurrent_backups: parseInt(document.getElementById("max-concurrent").value, 10),
 			event_retention_days: parseInt(document.getElementById("event-days").value, 10),
