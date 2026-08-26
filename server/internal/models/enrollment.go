@@ -1,6 +1,7 @@
 package models
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"time"
 
@@ -91,4 +92,51 @@ func PurgeExpiredEnrollmentKeys(db *sql.DB) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// GetOrCreateStaticEnrollmentToken returns the server's permanent
+// enrollment key, generating one on first use. Unlike a one-time
+// enrollment_keys row, this key never expires and enrolling a device with
+// it doesn't consume it - it's meant to sit on the Paramètres page and be
+// reused for every future device, so an operator doesn't have to generate
+// and copy a fresh one-time key for each machine. The existing one-time
+// flow (handleCreateEnrollmentKey) is untouched and keeps working exactly
+// as before for anyone who prefers a key that expires after use.
+func GetOrCreateStaticEnrollmentToken(db *sql.DB) (string, error) {
+	var token string
+	if err := db.QueryRow(`SELECT static_enrollment_token FROM settings WHERE id = 1`).Scan(&token); err != nil {
+		return "", err
+	}
+	if token != "" {
+		return token, nil
+	}
+	return RegenerateStaticEnrollmentToken(db)
+}
+
+// RegenerateStaticEnrollmentToken replaces the permanent enrollment key
+// with a new random one, immediately invalidating the old one (any device
+// mid-enrollment with the old value will need the new one).
+func RegenerateStaticEnrollmentToken(db *sql.DB) (string, error) {
+	token := idgen.Token(24)
+	if _, err := db.Exec(`UPDATE settings SET static_enrollment_token = ? WHERE id = 1`, token); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// MatchesStaticEnrollmentToken reports whether token is the current
+// permanent enrollment key. Constant-time so a mistyped guess can't be
+// distinguished from a near-miss by timing, same care as a password check.
+func MatchesStaticEnrollmentToken(db *sql.DB, token string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	var stored string
+	if err := db.QueryRow(`SELECT static_enrollment_token FROM settings WHERE id = 1`).Scan(&stored); err != nil {
+		return false, err
+	}
+	if stored == "" {
+		return false, nil
+	}
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(token)) == 1, nil
 }

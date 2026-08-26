@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS settings (
 	event_retention_days INTEGER NOT NULL DEFAULT 30,
 	event_retention_max_rows INTEGER NOT NULL DEFAULT 20000,
 	chunk_size_bytes INTEGER NOT NULL DEFAULT 16777216,
-	max_concurrent_backups INTEGER NOT NULL DEFAULT 1
+	max_concurrent_backups INTEGER NOT NULL DEFAULT 1,
+	static_enrollment_token TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS enrollment_keys (
@@ -125,6 +126,12 @@ func Open(dbPath string) (*sql.DB, error) {
 func migrate(sqlDB *sql.DB) error {
 	columns := []struct{ table, column, definition string }{
 		{"settings", "max_concurrent_backups", "INTEGER NOT NULL DEFAULT 1"},
+		// Deliberately plaintext, unlike every other credential in this
+		// schema: this key is meant to stay visible in the panel
+		// indefinitely so an operator can re-read and reuse it, which a
+		// hash (by design, one-way) can't support. See
+		// models.GetOrCreateStaticEnrollmentToken.
+		{"settings", "static_enrollment_token", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range columns {
 		exists, err := columnExists(sqlDB, c.table, c.column)

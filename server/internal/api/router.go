@@ -48,6 +48,8 @@ func (a *API) RegisterPanel(mux *http.ServeMux) {
 
 	mux.HandleFunc("POST /api/enrollment-keys", a.requireSession(a.handleCreateEnrollmentKey))
 	mux.HandleFunc("GET /api/enrollment-keys", a.requireSession(a.handleListEnrollmentKeys))
+	mux.HandleFunc("GET /api/settings/enrollment-key", a.requireSession(a.handleGetStaticEnrollmentKey))
+	mux.HandleFunc("POST /api/settings/enrollment-key/regenerate", a.requireSession(a.handleRegenerateStaticEnrollmentKey))
 
 	mux.HandleFunc("POST /api/downloads/upload", a.requireSession(a.handleUploadDownload))
 	mux.HandleFunc("DELETE /api/downloads/{name}", a.requireSession(func(w http.ResponseWriter, r *http.Request) {

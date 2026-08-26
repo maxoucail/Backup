@@ -59,6 +59,24 @@
 			<div class="card">
 				<div class="section-title">Enrôler un nouvel appareil</div>
 				<p class="muted" style="margin-top:0;">Générez une clé, puis lancez l'agent sur le poste Windows ou macOS : il demandera l'adresse de ce serveur et cette clé au premier démarrage.</p>
+
+				<div style="margin-bottom:20px; padding:14px; background:var(--bg-panel-2); border-radius:8px;">
+					<div class="muted" style="font-size:.8rem;">Clé d'enrôlement permanente</div>
+					<div class="mono" id="static-enroll-token" style="word-break:break-all; margin:6px 0;">…</div>
+					<div class="muted" style="font-size:.8rem;">Adresse du serveur</div>
+					<div class="mono" id="static-enroll-host" style="margin-bottom:10px;"></div>
+					<div class="row">
+						<button class="btn secondary small" type="button" id="copy-static-key-btn">Copier</button>
+						<button class="btn danger small" type="button" id="regen-static-key-btn">Régénérer</button>
+					</div>
+					<div class="muted" style="font-size:.8rem; margin-top:10px;">
+						Toujours visible ici, réutilisable pour n'importe quel nombre d'appareils, ne périme jamais.
+						Régénérer invalide immédiatement les futurs enrôlements avec l'ancienne valeur (sans effet
+						sur les appareils déjà enrôlés).
+					</div>
+				</div>
+
+				<div class="muted" style="font-size:.85rem; margin-bottom:8px;">Ou générez une clé à usage unique, valable un temps limité :</div>
 				<form id="enroll-form">
 					<label>Étiquette (facultatif)</label>
 					<input class="input" id="enroll-label" placeholder="ex: PC de Marie">
@@ -199,6 +217,38 @@ async function loadKeys() {
 	document.getElementById("keys-body").innerHTML = (keys || []).map(keyRow).join("");
 }
 
+function showStaticKey(res) {
+	document.getElementById("static-enroll-token").textContent = res.token;
+	document.getElementById("static-enroll-host").textContent = res.server_host;
+}
+
+async function loadStaticKey() {
+	try {
+		showStaticKey(await api("GET", "/api/settings/enrollment-key"));
+	} catch (err) {
+		toast(err.message, "error");
+	}
+}
+
+document.getElementById("copy-static-key-btn").addEventListener("click", async () => {
+	try {
+		await navigator.clipboard.writeText(document.getElementById("static-enroll-token").textContent);
+		toast("Clé copiée.", "success");
+	} catch (err) {
+		toast("Impossible de copier automatiquement, sélectionnez le texte à la main.", "error");
+	}
+});
+
+document.getElementById("regen-static-key-btn").addEventListener("click", async () => {
+	if (!confirm("Régénérer la clé permanente ? L'ancienne ne fonctionnera plus pour de nouveaux enrôlements (les appareils déjà enrôlés ne sont pas affectés).")) return;
+	try {
+		showStaticKey(await api("POST", "/api/settings/enrollment-key/regenerate"));
+		toast("Clé régénérée.", "success");
+	} catch (err) {
+		toast(err.message, "error");
+	}
+});
+
 document.getElementById("enroll-form").addEventListener("submit", async (e) => {
 	e.preventDefault();
 	try {
@@ -277,6 +327,7 @@ document.getElementById("upload-form").addEventListener("submit", async (e) => {
 });
 
 loadSettings().catch(err => toast(err.message, "error"));
+loadStaticKey();
 loadKeys().catch(err => toast(err.message, "error"));
 loadDownloads().catch(err => toast(err.message, "error"));
 </script>
