@@ -58,10 +58,10 @@
 
 			<div class="card">
 				<div class="section-title">Enrôler un nouvel appareil</div>
-				<p class="muted" style="margin-top:0;">Générez une clé, puis lancez l'agent sur le poste Windows ou macOS : il demandera l'adresse de ce serveur et cette clé au premier démarrage.</p>
+				<p class="muted" style="margin-top:0;">Lancez l'agent sur le poste Windows ou macOS : il demandera l'adresse de ce serveur et la clé ci-dessous au premier démarrage.</p>
 
-				<div style="margin-bottom:20px; padding:14px; background:var(--bg-panel-2); border-radius:8px;">
-					<div class="muted" style="font-size:.8rem;">Clé d'enrôlement permanente</div>
+				<div style="padding:14px; background:var(--bg-panel-2); border-radius:8px;">
+					<div class="muted" style="font-size:.8rem;">Clé d'enrôlement</div>
 					<div class="mono" id="static-enroll-token" style="word-break:break-all; margin:6px 0;">…</div>
 					<div class="muted" style="font-size:.8rem;">Adresse du serveur</div>
 					<div class="mono" id="static-enroll-host" style="margin-bottom:10px;"></div>
@@ -75,31 +75,6 @@
 						sur les appareils déjà enrôlés).
 					</div>
 				</div>
-
-				<div class="muted" style="font-size:.85rem; margin-bottom:8px;">Ou générez une clé à usage unique, valable un temps limité :</div>
-				<form id="enroll-form">
-					<label>Étiquette (facultatif)</label>
-					<input class="input" id="enroll-label" placeholder="ex: PC de Marie">
-					<label>Validité de la clé (minutes)</label>
-					<input class="input" id="enroll-ttl" type="number" value="30" min="1">
-					<button class="btn" type="submit" style="margin-top:14px;">Générer une clé</button>
-				</form>
-				<div id="enroll-result" style="display:none; margin-top:16px; padding:14px; background:var(--bg-panel-2); border-radius:8px;">
-					<div class="muted" style="font-size:.8rem;">Adresse du serveur</div>
-					<div class="mono" id="enroll-host" style="margin-bottom:10px;"></div>
-					<div class="muted" style="font-size:.8rem;">Clé d'enrôlement (valable une seule fois)</div>
-					<div class="mono" id="enroll-token" style="word-break:break-all;"></div>
-					<div class="muted" style="font-size:.8rem; margin-top:10px;">
-						Envoyez à l'utilisateur : la clé ci-dessus, et le lien
-						<a id="enroll-download-link" target="_blank">/download</a> pour installer l'agent.
-					</div>
-				</div>
-
-				<div class="section-title" style="margin-top:24px;">Clés récentes</div>
-				<table>
-					<thead><tr><th>Étiquette</th><th>Créée</th><th>Expire</th><th>Statut</th></tr></thead>
-					<tbody id="keys-body"></tbody>
-				</table>
 			</div>
 		</div>
 
@@ -207,16 +182,6 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
 	}
 });
 
-function keyRow(k) {
-	const status = k.used_at ? "utilisée" : (new Date(k.expires_at) < new Date() ? "expirée" : "active");
-	return `<tr><td>${k.label || "—"}</td><td class="muted">${fmtDate(k.created_at)}</td><td class="muted">${fmtDate(k.expires_at)}</td><td>${status}</td></tr>`;
-}
-
-async function loadKeys() {
-	const keys = await api("GET", "/api/enrollment-keys");
-	document.getElementById("keys-body").innerHTML = (keys || []).map(keyRow).join("");
-}
-
 function showStaticKey(res) {
 	document.getElementById("static-enroll-token").textContent = res.token;
 	document.getElementById("static-enroll-host").textContent = res.server_host;
@@ -244,25 +209,6 @@ document.getElementById("regen-static-key-btn").addEventListener("click", async 
 	try {
 		showStaticKey(await api("POST", "/api/settings/enrollment-key/regenerate"));
 		toast("Clé régénérée.", "success");
-	} catch (err) {
-		toast(err.message, "error");
-	}
-});
-
-document.getElementById("enroll-form").addEventListener("submit", async (e) => {
-	e.preventDefault();
-	try {
-		const res = await api("POST", "/api/enrollment-keys", {
-			label: document.getElementById("enroll-label").value,
-			ttl_minutes: parseInt(document.getElementById("enroll-ttl").value, 10) || 30,
-		});
-		document.getElementById("enroll-host").textContent = res.server_host;
-		document.getElementById("enroll-token").textContent = res.token;
-		const downloadLink = document.getElementById("enroll-download-link");
-		downloadLink.href = `${window.location.protocol}//${res.server_host}/download`;
-		downloadLink.textContent = `${window.location.protocol}//${res.server_host}/download`;
-		document.getElementById("enroll-result").style.display = "block";
-		loadKeys();
 	} catch (err) {
 		toast(err.message, "error");
 	}
@@ -328,7 +274,6 @@ document.getElementById("upload-form").addEventListener("submit", async (e) => {
 
 loadSettings().catch(err => toast(err.message, "error"));
 loadStaticKey();
-loadKeys().catch(err => toast(err.message, "error"));
 loadDownloads().catch(err => toast(err.message, "error"));
 </script>
 </body>
