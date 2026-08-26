@@ -10,7 +10,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 AGENT_DIR="../.."
 VERSION="${1:-1.0.0}"
 
-echo "==> Compilation Windows (amd64)"
+# VIProductVersion accepts strictly x.x.x.x and rejects anything else, so
+# pad a shorter version ("1.0" -> "1.0.0.0") and strip any suffix
+# ("1.0.9-rc1" -> "1.0.9.0") rather than letting makensis fail on it.
+VERSION4="$(printf '%s' "$VERSION" | sed 's/[^0-9.].*$//' | awk -F. '{printf "%d.%d.%d.%d", $1, $2, $3, $4}')"
+
+echo "==> Compilation Windows (amd64) - version $VERSION"
 GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -H=windowsgui -X main.AgentVersion=$VERSION" \
 	-o backup-agent.exe "$AGENT_DIR/cmd/backup-agent"
 
@@ -20,6 +25,10 @@ if ! command -v makensis >/dev/null 2>&1; then
 fi
 
 echo "==> Génération de l'installeur"
-makensis installer.nsi
+# Old builds produced an unversioned BackupAgentSetup.exe; remove it so a
+# stale one can't be picked up by a glob and published as if it were this
+# build.
+rm -f BackupAgentSetup.exe
+makensis -DAPP_VERSION="$VERSION" -DAPP_VERSION4="$VERSION4" installer.nsi
 
-echo "==> Terminé : $(pwd)/BackupAgentSetup.exe"
+echo "==> Terminé : $(pwd)/BackupAgentSetup-$VERSION.exe"

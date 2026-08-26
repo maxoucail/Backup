@@ -22,8 +22,33 @@
 !define APP_EXE "backup-agent.exe"
 !define COMPANY "Backup Center"
 
-Name "${APP_NAME}"
-OutFile "BackupAgentSetup.exe"
+; APP_VERSION is passed in by build.sh (-DAPP_VERSION=x.y.z); the default
+; only applies if makensis is invoked by hand.
+!ifndef APP_VERSION
+	!define APP_VERSION "0.0.0"
+!endif
+
+; The version belongs in the *filename*: a fixed name makes every build
+; look identical on the download page, so an operator can't tell whether a
+; redeployed agent actually landed, and browsers happily serve a cached
+; copy of the old one under the unchanged URL.
+Name "${APP_NAME} ${APP_VERSION}"
+OutFile "BackupAgentSetup-${APP_VERSION}.exe"
+
+; Same version in the file's own properties, so it's still identifiable
+; once downloaded and renamed, and in Programmes et fonctionnalités.
+; APP_VERSION4 is the strict x.x.x.x form VIProductVersion demands,
+; normalised by build.sh - VIProductVersion rejects anything else outright.
+!ifndef APP_VERSION4
+	!define APP_VERSION4 "0.0.0.0"
+!endif
+VIProductVersion "${APP_VERSION4}"
+VIAddVersionKey "ProductName" "${APP_NAME}"
+VIAddVersionKey "ProductVersion" "${APP_VERSION}"
+VIAddVersionKey "FileVersion" "${APP_VERSION}"
+VIAddVersionKey "CompanyName" "${COMPANY}"
+VIAddVersionKey "FileDescription" "Installeur ${APP_NAME}"
+VIAddVersionKey "LegalCopyright" "${COMPANY}"
 InstallDir "$PROGRAMFILES64\BackupAgent"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
@@ -45,6 +70,10 @@ Section "Install"
 	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "DisplayName" "${APP_NAME}"
 	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "UninstallString" "$INSTDIR\uninstall.exe"
 	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "Publisher" "${COMPANY}"
+	; Lets an admin confirm which agent version a machine is actually
+	; running straight from Programmes et fonctionnalités - the quickest
+	; way to spot a poste still on an old build after a fleet update.
+	WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BackupAgent" "DisplayVersion" "${APP_VERSION}"
 
 	; Registers and starts the Windows Service. On first run (device not
 	; yet enrolled), the service itself opens the enrollment wizard in the

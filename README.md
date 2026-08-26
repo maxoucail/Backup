@@ -136,7 +136,7 @@ premier démarrage (`journalctl -u backup-server`) et écrit dans
 ### Enrôler un appareil
 
 1. Dans le panneau, **Paramètres → Installeurs téléchargeables** : déposez
-   une fois `BackupAgentSetup.exe` et l'archive macOS (récupérables sur les
+   une fois `BackupAgentSetup-<version>.exe` et l'archive macOS (récupérables sur les
    releases GitHub ou compilés vous-même, voir plus bas).
 2. **Paramètres → Enrôler un nouvel appareil** : générez une clé. Le
    panneau affiche alors le lien `/download` et la clé à transmettre à
@@ -150,7 +150,7 @@ premier démarrage (`journalctl -u backup-server`) et écrit dans
 
 ### Agent Windows
 
-Téléchargez `BackupAgentSetup.exe` (généré par la CI, ou compilé localement
+Téléchargez `BackupAgentSetup-<version>.exe` (généré par la CI, ou compilé localement
 avec `agent/packaging/windows/build.sh`) et exécutez-le **en administrateur**
 (l'installeur le demande). Il enregistre un vrai Service Windows qui démarre
 au boot et se relance seul en cas d'incident.

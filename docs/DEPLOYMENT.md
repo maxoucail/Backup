@@ -59,7 +59,7 @@ accessibles.
 
 ### Installer
 
-Téléchargez `BackupAgentSetup.exe` (release GitHub, ou compilé vous-même
+Téléchargez `BackupAgentSetup-<version>.exe` (release GitHub, ou compilé vous-même
 avec `agent/packaging/windows/build.sh`) et lancez-le **en administrateur**
 (l'installeur le demande via l'élévation UAC). Il installe le binaire dans
 `Program Files\BackupAgent` et l'enregistre comme un vrai **Service
