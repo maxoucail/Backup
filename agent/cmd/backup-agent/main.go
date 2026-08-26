@@ -459,6 +459,31 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		return lastBackupAt, lastBackupStatus
 	}
 
+	// rememberUserLocations records where this machine's user folders
+	// resolve to right now, on every backup. Restore reads it back when it
+	// can't resolve them live - a restore triggered from the panel while
+	// nobody is logged in has no session to resolve against, and without
+	// this the files would have nowhere honest to go. Only ever stores a
+	// genuine successful resolution, never a guess.
+	rememberUserLocations := func() {
+		folders := scanner.ResolveKnownFolders()
+		home, err := userctx.HomeDir()
+		if err != nil || home == "" || !filepath.IsAbs(home) {
+			home = ""
+		}
+		if len(folders) == 0 && home == "" {
+			return
+		}
+		mutateCfg(func(c *config.Config) {
+			if home != "" {
+				c.LastKnownHome = home
+			}
+			if len(folders) > 0 {
+				c.LastKnownFolders = folders
+			}
+		})
+	}
+
 	warnIfBlocked := func(roots []scanner.Root) {
 		blocked := scanner.CheckAccess(roots)
 		if len(blocked) == 0 {
@@ -491,6 +516,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		_, configuredPaths, chunkSize := pol.snapshot()
 		roots := scanner.ResolveRoots(configuredPaths)
 		warnIfBlocked(roots)
+		rememberUserLocations()
 
 		result, err := backupjob.Run(jobCtx, api, kind, roots, chunkSize, func(p backupjob.Progress) {
 			if popup != nil {
@@ -575,21 +601,45 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		popup, _ := progressui.Show("Restauration en cours")
 		wsc.Send(protocol.Envelope{Type: protocol.TypeRestoreStarted, SnapshotID: snapshotID})
 
-		result, err := restorejob.Run(jobCtx, api, snapshotID, func(p restorejob.Progress) {
-			popup.Update(p.Phase, p.Percent, p.EtaSeconds, p.RestoredBytes)
-			wsc.Send(protocol.Envelope{
-				Type: protocol.TypeProgress, Phase: p.Phase, FileCount: p.FileCount,
-				LogicalBytes: p.LogicalBytes, UploadedBytes: p.RestoredBytes, Percent: p.Percent, EtaSeconds: p.EtaSeconds,
+		// Resolved before any file is written: if this machine's user
+		// folders can't be determined at all, the restore must say so
+		// plainly rather than start writing files somewhere arbitrary.
+		cfgMu.Lock()
+		loc, locErr := restorejob.ResolveLocations(cfg)
+		cfgMu.Unlock()
+
+		var result *restorejob.Result
+		err := locErr
+		if locErr == nil {
+			result, err = restorejob.Run(jobCtx, api, snapshotID, loc, func(p restorejob.Progress) {
+				popup.Update(p.Phase, p.Percent, p.EtaSeconds, p.RestoredBytes)
+				wsc.Send(protocol.Envelope{
+					Type: protocol.TypeProgress, Phase: p.Phase, FileCount: p.FileCount,
+					LogicalBytes: p.LogicalBytes, UploadedBytes: p.RestoredBytes, Percent: p.Percent, EtaSeconds: p.EtaSeconds,
+				})
 			})
-		})
+		}
 
 		status, errMsg := protocol.SnapshotStatusSuccess, ""
 		if err != nil {
 			status, errMsg = protocol.SnapshotStatusFailed, err.Error()
 			checkAuth(err)
 			log.Printf("restauration échouée: %v", err)
+			wsc.Send(protocol.Envelope{Type: protocol.TypeLog, Level: protocol.LevelError,
+				Message: "Restauration échouée : " + err.Error()})
 		} else {
-			log.Printf("restauration terminée: %d fichiers restaurés", result.FileCount)
+			dests := result.TopDestinations(4)
+			log.Printf("restauration terminée: %d fichiers restaurés dans %s", result.FileCount, strings.Join(dests, ", "))
+			// Always report *where* the files went. A restore that only
+			// says "42 files restored" is indistinguishable from one that
+			// wrote them somewhere the user will never find.
+			msg := fmt.Sprintf("Restauration terminée : %d fichier(s) restauré(s) dans %s.",
+				result.FileCount, strings.Join(dests, ", "))
+			if result.UsedFallbackPaths {
+				msg += " (Aucune session ouverte sur le poste : emplacements repris de la dernière sauvegarde réussie.)"
+			}
+			wsc.Send(protocol.Envelope{Type: protocol.TypeLog, Level: protocol.LevelInfo, Message: msg})
+
 			if n := len(result.SkippedFiles); n > 0 {
 				sample := result.SkippedFiles
 				if len(sample) > 5 {

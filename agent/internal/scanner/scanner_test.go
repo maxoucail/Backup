@@ -67,15 +67,16 @@ func TestRelPathStripsColonForCustomPathOutsideHome(t *testing.T) {
 }
 
 // The restore side of the same contract: a logical path must resolve to
-// wherever that folder currently lives for this user. Resolve() reads the
-// registry on Windows; on this test platform it's home-relative, which is
-// enough to prove the mapping is applied rather than the raw path used.
+// wherever that folder currently lives for this user. ResolveKnownFolders
+// reads the registry on Windows; on this test platform it's home-relative,
+// which is enough to prove the mapping is applied rather than the raw path
+// used.
 func TestKnownFolderDestResolvesAgainstCurrentLocation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	got, ok := KnownFolderDest("Downloads/facture.pdf")
+	got, ok := KnownFolderDest(ResolveKnownFolders(), "Downloads/facture.pdf")
 	if !ok {
 		t.Fatal("KnownFolderDest doit reconnaître un dossier connu")
 	}
@@ -88,8 +89,13 @@ func TestKnownFolderDestResolvesAgainstCurrentLocation(t *testing.T) {
 // A path that names no known folder must be left to the caller, not
 // force-fitted into one.
 func TestKnownFolderDestIgnoresOtherPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	resolved := ResolveKnownFolders()
+
 	for _, p := range []string{"_outside/E/Projets/x.txt", "Projets/x.txt", ""} {
-		if _, ok := KnownFolderDest(p); ok {
+		if _, ok := KnownFolderDest(resolved, p); ok {
 			t.Fatalf("KnownFolderDest(%q) ne doit pas revendiquer ce chemin", p)
 		}
 	}
@@ -102,8 +108,35 @@ func TestKnownFolderDestRefusesPathEscape(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	if dest, ok := KnownFolderDest("Downloads/../../../etc/passwd"); ok {
+	if dest, ok := KnownFolderDest(ResolveKnownFolders(), "Downloads/../../../etc/passwd"); ok {
 		t.Fatalf("KnownFolderDest a accepté une évasion de chemin: %q", dest)
+	}
+}
+
+// The critical safety property: when the user's folders can't be resolved
+// at all - a Windows Service with nobody logged in, which is exactly when
+// a panel-triggered restore arrives - KnownFolderDest must refuse rather
+// than hand back a path built on a guess. Silently succeeding here is what
+// sends restored files into the service account's own profile, where the
+// user will never find them.
+func TestKnownFolderDestRefusesWhenNothingResolved(t *testing.T) {
+	if dest, ok := KnownFolderDest(map[string]string{}, "Downloads/facture.pdf"); ok {
+		t.Fatalf("KnownFolderDest doit échouer sans dossier résolu, a renvoyé %q", dest)
+	}
+}
+
+// Resolution must never hand back a relative path: joining a manifest
+// entry onto one would write files relative to the service's working
+// directory rather than into the user's folders.
+func TestResolveKnownFoldersOnlyReturnsAbsolutePaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	for name, p := range ResolveKnownFolders() {
+		if !filepath.IsAbs(p) {
+			t.Fatalf("dossier %q résolu en chemin relatif %q", name, p)
+		}
 	}
 }
 

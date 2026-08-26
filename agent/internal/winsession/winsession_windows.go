@@ -25,12 +25,33 @@ var (
 
 	procWTSGetActiveConsoleSessionId = kernel32.NewProc("WTSGetActiveConsoleSessionId")
 	procWTSQueryUserToken            = wtsapi32.NewProc("WTSQueryUserToken")
+	procWTSEnumerateSessionsW        = wtsapi32.NewProc("WTSEnumerateSessionsW")
+	procWTSFreeMemory                = wtsapi32.NewProc("WTSFreeMemory")
 	procDuplicateTokenEx             = advapi32.NewProc("DuplicateTokenEx")
 	procCreateEnvironmentBlock       = userenv.NewProc("CreateEnvironmentBlock")
 	procDestroyEnvironmentBlock      = userenv.NewProc("DestroyEnvironmentBlock")
 	procCreateProcessAsUserW         = advapi32.NewProc("CreateProcessAsUserW")
 	procGetUserProfileDirectoryW     = userenv.NewProc("GetUserProfileDirectoryW")
 )
+
+// WTS_CONNECTSTATE_CLASS values we care about. A session in any of these
+// states belongs to a real user with a loadable profile; the ones we skip
+// (WTSConnectQuery, WTSShadow, WTSIdle, WTSListen, WTSDown, WTSInit) are
+// either transient plumbing or not a user session at all.
+const (
+	wtsActive       = 0
+	wtsConnected    = 1
+	wtsDisconnected = 4
+)
+
+// wtsSessionInfo mirrors WTS_SESSION_INFOW. Field types (not hand-computed
+// offsets) let Go apply the platform's own struct alignment, so this is
+// correct on both 386 and amd64.
+type wtsSessionInfo struct {
+	SessionID       uint32
+	pWinStationName *uint16
+	State           uint32
+}
 
 // ConsoleUserSID returns the SID (as its canonical S-1-5-... string form)
 // of whoever is logged into the console - used to read that user's own
@@ -100,17 +121,93 @@ func activeConsoleSessionID() (uint32, error) {
 	return sid, nil
 }
 
-func consoleUserToken() (syscall.Handle, error) {
-	sid, err := activeConsoleSessionID()
-	if err != nil {
-		return 0, err
-	}
+// tokenForSession asks for the user token of one session. Fails, normally
+// and expectedly, for a session with no logged-on user (the login screen
+// is itself a session).
+func tokenForSession(id uint32) (syscall.Handle, error) {
 	var userToken syscall.Handle
-	r, _, err := procWTSQueryUserToken.Call(uintptr(sid), uintptr(unsafe.Pointer(&userToken)))
+	r, _, err := procWTSQueryUserToken.Call(uintptr(id), uintptr(unsafe.Pointer(&userToken)))
 	if r == 0 {
-		return 0, fmt.Errorf("WTSQueryUserToken: %w", err)
+		return 0, fmt.Errorf("WTSQueryUserToken(session %d): %w", id, err)
 	}
 	return userToken, nil
+}
+
+// candidateSessionIDs lists the sessions worth trying for a user token,
+// best first.
+//
+// The physical console comes first, but it is deliberately *not* the only
+// candidate: WTSGetActiveConsoleSessionId only ever describes the machine's
+// physically-attached session, and returns 0xFFFFFFFF outright when nobody
+// is at it. Relying on it alone made this whole package - and so every
+// folder path the agent resolves - fail on entirely ordinary machines:
+// a user connected over RDP (their session is real and active but is never
+// the console), a machine sitting at the lock or login screen when a
+// restore is triggered from the panel, or a session in the middle of
+// connecting. Enumerating the session table and accepting any session that
+// actually yields a user token covers all of those.
+func candidateSessionIDs() []uint32 {
+	var ids []uint32
+	seen := make(map[uint32]bool)
+	add := func(id uint32) {
+		// Session 0 is the isolated services session - it has no
+		// interactive user, so it can never be the profile we want.
+		if id == 0 || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	if consoleID, err := activeConsoleSessionID(); err == nil {
+		add(consoleID)
+	}
+
+	var info *wtsSessionInfo
+	var count uint32
+	r, _, _ := procWTSEnumerateSessionsW.Call(
+		0, // WTS_CURRENT_SERVER_HANDLE
+		0, // Reserved
+		1, // Version
+		uintptr(unsafe.Pointer(&info)),
+		uintptr(unsafe.Pointer(&count)),
+	)
+	if r == 0 || info == nil {
+		return ids
+	}
+	defer procWTSFreeMemory.Call(uintptr(unsafe.Pointer(info)))
+
+	sessions := unsafe.Slice(info, count)
+	// Two passes so a fully-active session is always preferred over one
+	// that's merely connected or disconnected, regardless of table order.
+	for _, s := range sessions {
+		if s.State == wtsActive {
+			add(s.SessionID)
+		}
+	}
+	for _, s := range sessions {
+		if s.State == wtsConnected || s.State == wtsDisconnected {
+			add(s.SessionID)
+		}
+	}
+	return ids
+}
+
+// consoleUserToken returns a token for the best available logged-on user.
+func consoleUserToken() (syscall.Handle, error) {
+	ids := candidateSessionIDs()
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("aucune session utilisateur sur ce poste (personne n'est connecté)")
+	}
+	var lastErr error
+	for _, id := range ids {
+		token, err := tokenForSession(id)
+		if err == nil {
+			return token, nil
+		}
+		lastErr = err
+	}
+	return 0, fmt.Errorf("aucune session utilisateur exploitable (%d essayée(s)): %w", len(ids), lastErr)
 }
 
 func primaryToken() (syscall.Handle, error) {

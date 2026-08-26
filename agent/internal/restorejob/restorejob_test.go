@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"backup-agent/internal/client"
+	"backup-agent/internal/config"
 	"backup-agent/internal/protocol"
 )
 
@@ -45,6 +47,17 @@ func manifestFile(path, hash string) protocol.ManifestFile {
 	return protocol.ManifestFile{Path: path, Size: int64(len("contenu-" + hash)), Chunks: []string{hash}}
 }
 
+// liveLocations resolves against the test's fake HOME, standing in for a
+// machine where a user session is available.
+func liveLocations(t *testing.T) *Locations {
+	t.Helper()
+	loc, err := ResolveLocations(nil)
+	if err != nil {
+		t.Fatalf("résolution des emplacements: %v", err)
+	}
+	return loc
+}
+
 // One file whose chunk is gone from the server must not sink the restore
 // of everything else - exactly the bug reported: a restore that aborted
 // entirely over a single bad entry, discarding files that had already come
@@ -62,7 +75,7 @@ func TestRestorePartialFailureStillRestoresTheRest(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	result, err := Run(t.Context(), c, "snap-test", nil)
+	result, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil)
 	if err != nil {
 		t.Fatalf("la restauration a échoué alors qu'un seul fichier posait problème: %v", err)
 	}
@@ -95,7 +108,7 @@ func TestRestoreFailsWhenNothingCouldBeRestored(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	if _, err := Run(t.Context(), c, "snap-test", nil); err == nil {
+	if _, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil); err == nil {
 		t.Fatal("une restauration dont aucun fichier n'a pu revenir doit échouer")
 	}
 }
@@ -116,7 +129,7 @@ func TestRestoreSanitizesLegacyColonInPath(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	result, err := Run(t.Context(), c, "snap-test", nil)
+	result, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil)
 	if err != nil {
 		t.Fatalf("la restauration d'un ancien manifeste avec un chemin absolu a échoué: %v", err)
 	}
@@ -146,7 +159,7 @@ func TestRestorePutsKnownFolderFileBackInThatFolder(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	if _, err := Run(t.Context(), c, "snap-test", nil); err != nil {
+	if _, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil); err != nil {
 		t.Fatalf("restauration échouée: %v", err)
 	}
 
@@ -180,7 +193,7 @@ func TestRestoreUsesOriginalAbsPathWhenAvailable(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	if _, err := Run(t.Context(), c, "snap-test", nil); err != nil {
+	if _, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil); err != nil {
 		t.Fatalf("restauration échouée: %v", err)
 	}
 
@@ -217,7 +230,7 @@ func TestRestoreFallsBackWhenAbsPathUnavailable(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	result, err := Run(t.Context(), c, "snap-test", nil)
+	result, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil)
 	if err != nil {
 		t.Fatalf("restauration échouée alors qu'un repli était possible: %v", err)
 	}
@@ -226,5 +239,124 @@ func TestRestoreFallsBackWhenAbsPathUnavailable(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "Desktop", "_outside", "E", "Projets", "rapport.docx")); err != nil {
 		t.Fatalf("le fichier doit atterrir dans le repli sur le Bureau: %v", err)
+	}
+}
+
+// The scenario behind "it restores into the void": a restore triggered
+// from the panel while nobody is logged in at the machine. Live
+// resolution of the user's folders yields nothing, and the paths
+// remembered from the last successful backup must take over so the files
+// still land in the real user's folders.
+func TestRestoreUsesLastKnownFoldersWhenNobodyIsLoggedIn(t *testing.T) {
+	realUserHome := t.TempDir()
+
+	// No live resolution available at all - what a service sees with no
+	// usable session.
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	loc, err := ResolveLocations(&config.Config{
+		LastKnownHome: realUserHome,
+		LastKnownFolders: map[string]string{
+			"Downloads": filepath.Join(realUserHome, "Downloads"),
+			"Desktop":   filepath.Join(realUserHome, "Desktop"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("les chemins de la dernière sauvegarde doivent servir de repli: %v", err)
+	}
+	if !loc.FromLastBackup {
+		t.Fatal("le repli doit être signalé comme tel pour pouvoir l'indiquer à l'opérateur")
+	}
+
+	srv := &fakeServer{
+		manifest: &protocol.Manifest{Files: []protocol.ManifestFile{
+			manifestFile("Downloads/facture.pdf", "hash-fallback"),
+		}},
+		missingChunks: map[string]bool{},
+	}
+	c := srv.start(t)
+
+	result, err := Run(t.Context(), c, "snap-test", loc, nil)
+	if err != nil {
+		t.Fatalf("restauration échouée: %v", err)
+	}
+	want := filepath.Join(realUserHome, "Downloads", "facture.pdf")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("le fichier doit atterrir dans les Téléchargements du vrai utilisateur (%s): %v", want, err)
+	}
+	if !result.UsedFallbackPaths {
+		t.Fatal("le résultat doit indiquer que les chemins de secours ont été utilisés")
+	}
+}
+
+// With no session AND no previous backup to fall back on, there is no
+// honest destination. Refusing outright - with an actionable message - is
+// the only correct outcome: writing the files anywhere else is what made
+// them disappear in the first place.
+func TestResolveLocationsFailsLoudlyWithNothingToGoOn(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	if _, err := ResolveLocations(&config.Config{}); err == nil {
+		t.Fatal("sans session ni sauvegarde précédente, la restauration doit échouer explicitement")
+	} else if !strings.Contains(err.Error(), "session") {
+		t.Fatalf("le message doit expliquer quoi faire, obtenu: %v", err)
+	}
+}
+
+// A restore must be able to say where it put things. "42 files restored"
+// with no destination is exactly as useless as the silent failure.
+func TestRestoreReportsWhereFilesLanded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	srv := &fakeServer{
+		manifest: &protocol.Manifest{Files: []protocol.ManifestFile{
+			manifestFile("Downloads/a.pdf", "hash-r1"),
+			manifestFile("Downloads/sous-dossier/b.pdf", "hash-r2"),
+		}},
+		missingChunks: map[string]bool{},
+	}
+	c := srv.start(t)
+
+	result, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil)
+	if err != nil {
+		t.Fatalf("restauration échouée: %v", err)
+	}
+	if len(result.Destinations) == 0 {
+		t.Fatal("le résultat doit indiquer où les fichiers ont été écrits")
+	}
+	// The nested directory must collapse into its parent for reporting.
+	tops := result.TopDestinations(4)
+	wantRoot := filepath.Join(home, "Downloads")
+	if len(tops) != 1 || tops[0] != wantRoot {
+		t.Fatalf("destinations résumées = %v, attendu [%s]", tops, wantRoot)
+	}
+}
+
+// A truncated or mismatched reassembly must never be presented as a
+// restored file: silently leaving a wrong-sized file in place of the real
+// one is worse than reporting the failure.
+func TestRestoreRejectsFileWithWrongSize(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	f := manifestFile("Documents/tronque.txt", "hash-short")
+	f.Size += 100 // manifest claims more bytes than the chunk will deliver
+
+	srv := &fakeServer{
+		manifest:      &protocol.Manifest{Files: []protocol.ManifestFile{f}},
+		missingChunks: map[string]bool{},
+	}
+	c := srv.start(t)
+
+	if _, err := Run(t.Context(), c, "snap-test", liveLocations(t), nil); err == nil {
+		t.Fatal("un fichier reconstitué à la mauvaise taille ne doit pas compter comme restauré")
+	}
+	if _, err := os.Stat(filepath.Join(home, "Documents", "tronque.txt")); err == nil {
+		t.Fatal("aucun fichier incomplet ne doit rester sur le disque")
 	}
 }

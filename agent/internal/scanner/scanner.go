@@ -259,24 +259,51 @@ func IsOutsideHome(relPath string) bool {
 	return strings.HasPrefix(relPath, outsideHomePrefix)
 }
 
+// ResolveKnownFolders resolves every well-known folder once, up front, for
+// reuse across every file in a restore. A folder whose resolution fails
+// (Windows Service with nobody logged in at the console right now, a
+// registry read that hiccups) is simply omitted rather than falling back
+// to some other guess - see knownfolders.ResolveErr for why that matters.
+//
+// Resolving once and reusing it, rather than fresh per file, is itself
+// part of what makes restore reliable: a Windows Service restoring many
+// files at once (see restoreConcurrency in restorejob) would otherwise
+// repeat an expensive WTS-token-plus-registry lookup once per file at
+// concurrency - exactly the kind of repeated call under load where a
+// transient OS-level failure shows up - and a fresh independent failure
+// per file meant it could silently affect only some files in an
+// otherwise-successful restore: correct for most files, files from that
+// one folder quietly missing, on some machines and not others.
+func ResolveKnownFolders() map[string]string {
+	out := make(map[string]string, len(defaultFolderNames))
+	for _, name := range defaultFolderNames {
+		if p, err := knownfolders.ResolveErr(name); err == nil && p != "" && filepath.IsAbs(p) {
+			out[name] = p
+		}
+	}
+	return out
+}
+
 // KnownFolderDest maps a manifest path back to an absolute destination on
-// *this* machine when its first segment names a well-known user folder:
-// "Downloads/facture.pdf" becomes this user's real Downloads folder
-// (registry-resolved on Windows, so a redirected folder is honoured) plus
+// *this* machine when its first segment names a well-known user folder
+// already resolved into resolved (see ResolveKnownFolders): "Downloads/
+// facture.pdf" becomes this user's real Downloads folder plus
 // "facture.pdf". This is what puts a restored file back where it belongs
 // even if the folder has been moved to another drive since - on this
 // machine or on the replacement machine the snapshot was moved to.
 //
-// Returns ok=false for a path that doesn't start with a known folder,
-// leaving the caller to decide where it goes.
-func KnownFolderDest(manifestPath string) (string, bool) {
+// Returns ok=false for a path that doesn't start with a known folder, or
+// whose folder isn't in resolved - failing closed there (rather than
+// falling back to some other guess) means the caller sees an ordinary
+// "couldn't restore this file" instead of a restore that reports success
+// while the file vanishes into a directory the user can't see.
+func KnownFolderDest(resolved map[string]string, manifestPath string) (string, bool) {
 	clean := path.Clean(filepath.ToSlash(manifestPath))
 	first, rest, _ := strings.Cut(clean, "/")
-	name, ok := matchKnownFolderName(first)
+	dir, ok := resolved[first]
 	if !ok {
 		return "", false
 	}
-	dir := knownfolders.Resolve(name)
 	if rest == "" {
 		return dir, true
 	}

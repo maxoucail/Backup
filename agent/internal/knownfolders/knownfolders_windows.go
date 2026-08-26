@@ -12,7 +12,7 @@
 package knownfolders
 
 import (
-	"os"
+	"errors"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -59,20 +59,54 @@ func expandEnv(s string) string {
 	return syscall.UTF16ToString(buf)
 }
 
+var errEmptyHome = errors.New("répertoire utilisateur vide")
+
 // Resolve returns the real, current path of a well-known folder ("Desktop",
 // "Downloads", "Documents", "Pictures"), following any redirection to
-// another drive. Falls back to <home>\<name> if the registry lookup fails
-// for any reason (fresh/unusual profile, restricted permissions, ...).
+// another drive. Returns "" if the current user's home can't be determined
+// at all; see ResolveErr for why a low-stakes caller (the backup-time
+// folder scan, which just skips what it can't find) can use this, and why
+// a caller where getting it wrong is dangerous (restore) must use
+// ResolveErr instead.
 func Resolve(name string) string {
+	p, err := ResolveErr(name)
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+// ResolveErr is like Resolve but reports failure instead of silently
+// falling back to os.UserHomeDir(). That fallback matters here: running as
+// a Windows Service under LocalSystem, userctx.HomeDir is overridden to
+// resolve the actual console user's home via their session token, and
+// that lookup can legitimately fail (nobody logged in at the console,
+// mid-logon/logoff, a WTS query racing a session change). os.UserHomeDir()
+// would then resolve LocalSystem's own profile
+// (C:\Windows\System32\config\systemprofile) - a real, valid path that is
+// not where any real user will ever look, and one most users can't even
+// browse to. Restoring a file there isn't a safe degradation, it's data
+// quietly vanishing into a directory nobody will check; the caller needs
+// to know resolution failed so it can fall back to somewhere honest (or
+// skip the file and say why) instead.
+//
+// The registry lookup itself still falls back to <home>\<name> when it
+// fails (fresh/unusual profile, restricted permissions, no redirection
+// configured) - that part is a reasonable default once home is known to
+// be the *real* user's home, not a substitute for a wrong one.
+func ResolveErr(name string) (string, error) {
 	home, err := userctx.HomeDir()
 	if err != nil {
-		home, _ = os.UserHomeDir()
+		return "", err
+	}
+	if home == "" {
+		return "", errEmptyHome
 	}
 	fallback := filepath.Join(home, name)
 
 	valueName, ok := registryName[name]
 	if !ok {
-		return fallback
+		return fallback, nil
 	}
 
 	root := registry.CURRENT_USER
@@ -84,17 +118,17 @@ func Resolve(name string) string {
 
 	k, err := registry.OpenKey(root, subKey, registry.QUERY_VALUE)
 	if err != nil {
-		return fallback
+		return fallback, nil
 	}
 	defer k.Close()
 
 	raw, _, err := k.GetStringValue(valueName)
 	if err != nil || raw == "" {
-		return fallback
+		return fallback, nil
 	}
 	resolved := filepath.Clean(expandEnv(raw))
 	if resolved == "" || resolved == "." {
-		return fallback
+		return fallback, nil
 	}
-	return resolved
+	return resolved, nil
 }

@@ -101,17 +101,44 @@ func ConsoleUser() (username string, uid int, err error) {
 	return username, uid, nil
 }
 
-// ConsoleUserHomeDir assumes the standard /Users/<name> convention (true
-// for local accounts, the overwhelming common case on a personal or
-// small-business Mac). A directory-bound account with a nonstandard home
-// path isn't handled - go/user's pure-Go lookup on darwin isn't reliable
-// without cgo, and this keeps the dependency-free build.
+// ConsoleUserHomeDir returns the console user's real home directory,
+// asking the directory service for it rather than assuming the standard
+// /Users/<name> layout - that assumption breaks for a directory-bound or
+// relocated account, and a wrong home here means backing up (or restoring
+// into) the wrong place entirely. Falls back to /Users/<name> only if
+// dscl can't answer, which is the right guess when there's nothing better.
 func ConsoleUserHomeDir() (string, error) {
 	username, _, err := ConsoleUser()
 	if err != nil {
 		return "", err
 	}
+	if home := dsclHomeDir(username); home != "" {
+		return home, nil
+	}
 	return filepath.Join("/Users", username), nil
+}
+
+// dsclHomeDir reads NFSHomeDirectory from the local directory service.
+// Returns "" on any doubt - a caller with a bad path is worse than a
+// caller that falls back to the conventional one.
+func dsclHomeDir(username string) string {
+	out, err := exec.Command("dscl", ".", "-read", "/Users/"+username, "NFSHomeDirectory").Output()
+	if err != nil {
+		return ""
+	}
+	// Output is "NFSHomeDirectory: /path/to/home".
+	_, value, found := strings.Cut(string(out), ":")
+	if !found {
+		return ""
+	}
+	home := strings.TrimSpace(value)
+	if home == "" || home == "/var/empty" || !filepath.IsAbs(home) {
+		return ""
+	}
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
+		return ""
+	}
+	return home
 }
 
 // LaunchInConsoleSession runs exePath with args as the console user,
