@@ -1,31 +1,20 @@
 // Package protocol mirrors the wire types defined by the server
-// (backup-server/internal/storage.Manifest and backup-server/internal/ws.Envelope).
-// The two codebases are separate Go modules by design - the agent must
-// build and run without ever needing the server's source - so the JSON
-// shapes are kept in sync here by contract rather than by a shared import.
+// (backup-server/internal/filestore.FileInfo and
+// backup-server/internal/ws.Envelope). The two codebases are separate Go
+// modules by design - the agent must build and run without ever needing
+// the server's source - so the JSON shapes are kept in sync here by
+// contract rather than by a shared import.
 package protocol
 
-type ManifestFile struct {
-	Path    string   `json:"path"`
-	Size    int64    `json:"size"`
-	ModTime int64    `json:"mtime"`
-	SHA256  string   `json:"sha256"`
-	Chunks  []string `json:"chunks"`
-	// AbsPath is set only for a file that lived outside the home
-	// directory when backed up (a manually configured root on a
-	// different drive than home, on Windows). Path is a sanitized,
-	// always-restorable fallback location under home; AbsPath is the
-	// file's real original location, tried first so a same-machine
-	// restore puts the file back where the user actually had it instead
-	// of quietly relocating it under home every time.
-	AbsPath string `json:"abs_path,omitempty"`
-}
-
-type Manifest struct {
-	DeviceID   string         `json:"device_id"`
-	SnapshotID string         `json:"snapshot_id"`
-	CreatedAt  string         `json:"created_at"`
-	Files      []ManifestFile `json:"files"`
+// FileInfo is one entry of what this machine currently holds, as announced
+// to the server's plan endpoint. Size and mtime are what the server
+// compares against its own copy to decide whether the file needs sending -
+// no hashing on either side, which is what keeps a scan of a large disk
+// cheap.
+type FileInfo struct {
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	ModTime int64  `json:"mtime"`
 }
 
 // Envelope is the WebSocket control-plane message shape, identical to
@@ -59,18 +48,15 @@ type Envelope struct {
 }
 
 const (
-	TypeHello           = "hello"
-	TypeConfig          = "config"
-	TypeBackupNow       = "backup_now"
-	TypeRestore         = "restore"
-	TypeCancel          = "cancel"
-	TypeUninstall       = "uninstall"
-	TypeProgress        = "progress"
-	TypeLog             = "log"
-	TypeBackupStarted   = "backup_started"
-	TypeBackupFinished  = "backup_finished"
-	TypeRestoreStarted  = "restore_started"
-	TypeRestoreFinished = "restore_finished"
+	TypeHello          = "hello"
+	TypeConfig         = "config"
+	TypeBackupNow      = "backup_now"
+	TypeCancel         = "cancel"
+	TypeUninstall      = "uninstall"
+	TypeProgress       = "progress"
+	TypeLog            = "log"
+	TypeBackupStarted  = "backup_started"
+	TypeBackupFinished = "backup_finished"
 )
 
 const (

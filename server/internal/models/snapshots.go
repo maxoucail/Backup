@@ -25,14 +25,14 @@ func CreateSnapshot(db *sql.DB, deviceID, kind string) (*Snapshot, error) {
 	return s, nil
 }
 
-const snapshotCols = `id, device_id, kind, status, started_at, finished_at, file_count, logical_bytes, uploaded_bytes, progress_percent, error_message, manifest_path`
+const snapshotCols = `id, device_id, kind, status, started_at, finished_at, file_count, logical_bytes, uploaded_bytes, progress_percent, error_message`
 
 func scanSnapshot(row interface{ Scan(dest ...any) error }) (*Snapshot, error) {
 	var s Snapshot
 	var started string
 	var finished sql.NullString
 	if err := row.Scan(&s.ID, &s.DeviceID, &s.Kind, &s.Status, &started, &finished,
-		&s.FileCount, &s.LogicalBytes, &s.UploadedBytes, &s.ProgressPercent, &s.ErrorMessage, &s.ManifestPath); err != nil {
+		&s.FileCount, &s.LogicalBytes, &s.UploadedBytes, &s.ProgressPercent, &s.ErrorMessage); err != nil {
 		return nil, err
 	}
 	s.StartedAt = fromDB(started)
@@ -89,45 +89,15 @@ func UpdateSnapshotProgress(db *sql.DB, id string, fileCount int, logicalBytes, 
 	return err
 }
 
-func FinishSnapshot(db *sql.DB, id, status, errMsg, manifestPath string) error {
-	_, err := db.Exec(`UPDATE snapshots SET status=?, finished_at=?, error_message=?, manifest_path=?, progress_percent=100 WHERE id=?`,
-		status, toDB(time.Now()), errMsg, manifestPath, id)
+func FinishSnapshot(db *sql.DB, id, status, errMsg string) error {
+	_, err := db.Exec(`UPDATE snapshots SET status=?, finished_at=?, error_message=?, progress_percent=100 WHERE id=?`,
+		status, toDB(time.Now()), errMsg, id)
 	return err
 }
 
 func DeleteSnapshot(db *sql.DB, id string) error {
 	_, err := db.Exec(`DELETE FROM snapshots WHERE id = ?`, id)
 	return err
-}
-
-// ReassignSnapshot moves a snapshot's ownership to a different device -
-// the backup's chunks are content-addressed and not device-specific, so a
-// replacement machine can restore a snapshot originally taken on the
-// machine it's replacing without re-uploading anything. It counts toward
-// the target device's own retention limit from this point on.
-func ReassignSnapshot(db *sql.DB, id, targetDeviceID string) error {
-	_, err := db.Exec(`UPDATE snapshots SET device_id = ? WHERE id = ?`, targetDeviceID, id)
-	return err
-}
-
-// AllManifestPaths returns manifest paths for every snapshot that still
-// exists (any status) across all devices - used by the chunk garbage
-// collector to know what's still referenced.
-func AllManifestPaths(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT manifest_path FROM snapshots WHERE manifest_path != ''`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
 }
 
 // StorageUsedByDevice sums logical_bytes of the latest successful snapshot

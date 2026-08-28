@@ -1,8 +1,8 @@
 // Command backup-server is the NAS-side backup server. It exposes two
 // separate HTTP listeners on purpose: the admin web panel (login,
 // dashboard, device/settings management) on one port, and everything a
-// backed-up workstation's agent needs (enrollment, chunk upload/download,
-// the WebSocket control channel) on another. An operator can then firewall
+// backed-up workstation's agent needs (enrollment, file upload, the
+// WebSocket control channel) on another. An operator can then firewall
 // the panel port to an admin-only network/VLAN while leaving the agent
 // port reachable from every subnet workstations live on - the two have
 // very different "who should be able to reach this" requirements.
@@ -20,10 +20,10 @@ import (
 	"backup-server/internal/auth"
 	"backup-server/internal/config"
 	"backup-server/internal/db"
+	"backup-server/internal/filestore"
 	"backup-server/internal/models"
 	"backup-server/internal/queue"
 	"backup-server/internal/scheduler"
-	"backup-server/internal/storage"
 	"backup-server/internal/web"
 	"backup-server/internal/ws"
 )
@@ -48,11 +48,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("lecture des paramètres: %v", err)
 	}
-	store, err := storage.New(settings.StorageRoot)
+	store, err := filestore.New(settings.StorageRoot)
 	if err != nil {
 		log.Fatalf("stockage (%s): %v", settings.StorageRoot, err)
 	}
-	storeHolder := storage.NewHolder(store)
+	storeHolder := filestore.NewHolder(store)
 
 	sessions := auth.NewSessionSigner(cfg.SessionSecret)
 	hub := ws.NewHub(sqlDB)
@@ -134,7 +134,7 @@ func newServer(addr string, mux *http.ServeMux) *http.Server {
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // chunk uploads/downloads and long polling can legitimately run long
+		WriteTimeout: 0, // multi-gigabyte file uploads can legitimately run long
 		IdleTimeout:  120 * time.Second,
 	}
 }

@@ -5,7 +5,7 @@
 // decommissioned from the panel) it walks the operator through a
 // local-web-page enrollment wizard; from then on it backs up on a
 // schedule, catches up on missed backups with the user's consent, and
-// reacts to remote commands (backup now, restore, decommission) sent from
+// reacts to remote commands (backup now, cancel, decommission) sent from
 // the server's panel.
 package main
 
@@ -38,7 +38,6 @@ import (
 	"backup-agent/internal/progressui"
 	"backup-agent/internal/protocol"
 	"backup-agent/internal/reschedulewizard"
-	"backup-agent/internal/restorejob"
 	"backup-agent/internal/scanner"
 	"backup-agent/internal/setupwizard"
 	"backup-agent/internal/svcmode"
@@ -52,7 +51,6 @@ var AgentVersion = "1.0.0"
 
 const defaultIntervalMinutes = 360
 const defaultRetentionCount = 7
-const defaultChunkSize = 16 * 1024 * 1024
 const missedBackupGrace = 10 * time.Minute
 
 // queueWaitBeforeOfferingSlot is how long this machine waits for its turn
@@ -289,14 +287,13 @@ type policy struct {
 	intervalMinutes int
 	retentionCount  int
 	backupPaths     []string
-	chunkSize       int64
 }
 
 func newPolicy() *policy {
-	return &policy{intervalMinutes: defaultIntervalMinutes, retentionCount: defaultRetentionCount, chunkSize: defaultChunkSize}
+	return &policy{intervalMinutes: defaultIntervalMinutes, retentionCount: defaultRetentionCount}
 }
 
-func (p *policy) set(interval, retention int, paths []string, chunkSize int64) {
+func (p *policy) set(interval, retention int, paths []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if interval > 0 {
@@ -306,15 +303,12 @@ func (p *policy) set(interval, retention int, paths []string, chunkSize int64) {
 		p.retentionCount = retention
 	}
 	p.backupPaths = paths
-	if chunkSize > 0 {
-		p.chunkSize = chunkSize
-	}
 }
 
-func (p *policy) snapshot() (interval int, paths []string, chunkSize int64) {
+func (p *policy) snapshot() (interval int, paths []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.intervalMinutes, p.backupPaths, p.chunkSize
+	return p.intervalMinutes, p.backupPaths
 }
 
 func runAgent(ctx context.Context, cfg *config.Config) exitReason {
@@ -464,31 +458,6 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		return lastBackupAt, lastBackupStatus
 	}
 
-	// rememberUserLocations records where this machine's user folders
-	// resolve to right now, on every backup. Restore reads it back when it
-	// can't resolve them live - a restore triggered from the panel while
-	// nobody is logged in has no session to resolve against, and without
-	// this the files would have nowhere honest to go. Only ever stores a
-	// genuine successful resolution, never a guess.
-	rememberUserLocations := func() {
-		folders := scanner.ResolveKnownFolders()
-		home, err := userctx.HomeDir()
-		if err != nil || home == "" || !filepath.IsAbs(home) {
-			home = ""
-		}
-		if len(folders) == 0 && home == "" {
-			return
-		}
-		mutateCfg(func(c *config.Config) {
-			if home != "" {
-				c.LastKnownHome = home
-			}
-			if len(folders) > 0 {
-				c.LastKnownFolders = folders
-			}
-		})
-	}
-
 	warnIfBlocked := func(roots []scanner.Root) {
 		blocked := scanner.CheckAccess(roots)
 		if len(blocked) == 0 {
@@ -518,12 +487,11 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 		wsc.Send(protocol.Envelope{Type: protocol.TypeBackupStarted})
 
-		_, configuredPaths, chunkSize := pol.snapshot()
+		_, configuredPaths := pol.snapshot()
 		roots := scanner.ResolveRoots(configuredPaths)
 		warnIfBlocked(roots)
-		rememberUserLocations()
 
-		result, err := backupjob.Run(jobCtx, api, kind, roots, chunkSize, func(p backupjob.Progress) {
+		result, err := backupjob.Run(jobCtx, api, kind, roots, func(p backupjob.Progress) {
 			if popup != nil {
 				popup.Update(p.Phase, p.Percent, p.EtaSeconds, p.UploadedBytes)
 			}
@@ -575,7 +543,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 
 		if kind == protocol.SnapshotKindScheduled {
-			interval, _, _ := pol.snapshot()
+			interval, _ := pol.snapshot()
 			next := time.Now().Add(time.Duration(interval) * time.Minute)
 			mutateCfg(func(c *config.Config) {
 				c.NextScheduledAt = &next
@@ -595,72 +563,6 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 	}
 
-	runRestore := func(snapshotID string) {
-		jobCtx, done, ok := tryStartJob()
-		if !ok {
-			wsc.Send(protocol.Envelope{Type: protocol.TypeLog, Level: protocol.LevelWarning, Message: "Restauration ignorée : une tâche est déjà en cours."})
-			return
-		}
-		defer done()
-
-		popup, _ := progressui.Show("Restauration en cours")
-		wsc.Send(protocol.Envelope{Type: protocol.TypeRestoreStarted, SnapshotID: snapshotID})
-
-		// Resolved before any file is written: if this machine's user
-		// folders can't be determined at all, the restore must say so
-		// plainly rather than start writing files somewhere arbitrary.
-		cfgMu.Lock()
-		loc, locErr := restorejob.ResolveLocations(cfg)
-		cfgMu.Unlock()
-
-		var result *restorejob.Result
-		err := locErr
-		if locErr == nil {
-			result, err = restorejob.Run(jobCtx, api, snapshotID, loc, func(p restorejob.Progress) {
-				popup.Update(p.Phase, p.Percent, p.EtaSeconds, p.RestoredBytes)
-				wsc.Send(protocol.Envelope{
-					Type: protocol.TypeProgress, Phase: p.Phase, FileCount: p.FileCount,
-					LogicalBytes: p.LogicalBytes, UploadedBytes: p.RestoredBytes, Percent: p.Percent, EtaSeconds: p.EtaSeconds,
-				})
-			})
-		}
-
-		status, errMsg := protocol.SnapshotStatusSuccess, ""
-		if err != nil {
-			status, errMsg = protocol.SnapshotStatusFailed, err.Error()
-			checkAuth(err)
-			log.Printf("restauration échouée: %v", err)
-			wsc.Send(protocol.Envelope{Type: protocol.TypeLog, Level: protocol.LevelError,
-				Message: "Restauration échouée : " + err.Error()})
-		} else {
-			dests := result.TopDestinations(4)
-			log.Printf("restauration terminée: %d fichiers restaurés dans %s", result.FileCount, strings.Join(dests, ", "))
-			// Always report *where* the files went. A restore that only
-			// says "42 files restored" is indistinguishable from one that
-			// wrote them somewhere the user will never find.
-			msg := fmt.Sprintf("Restauration terminée : %d fichier(s) restauré(s) dans %s.",
-				result.FileCount, strings.Join(dests, ", "))
-			if result.UsedFallbackPaths {
-				msg += " (Aucune session ouverte sur le poste : emplacements repris de la dernière sauvegarde réussie.)"
-			}
-			wsc.Send(protocol.Envelope{Type: protocol.TypeLog, Level: protocol.LevelInfo, Message: msg})
-
-			if n := len(result.SkippedFiles); n > 0 {
-				sample := result.SkippedFiles
-				if len(sample) > 5 {
-					sample = sample[:5]
-				}
-				wsc.Send(protocol.Envelope{
-					Type: protocol.TypeLog, Level: protocol.LevelWarning,
-					Message: fmt.Sprintf("%d fichier(s) n'ont pas pu être restauré(s), par exemple : %s",
-						n, strings.Join(sample, ", ")),
-				})
-			}
-		}
-		wsc.Send(protocol.Envelope{Type: protocol.TypeRestoreFinished, SnapshotID: snapshotID, Status: status, ErrorMessage: errMsg})
-		popup.Finish(errMsg)
-	}
-
 	if runtime.GOOS == "windows" && svcmode.IsWindowsService() {
 		startTrayControlAPI(agentCtx, cfg, mutateCfg, wsc, runBackup, readLastBackup)
 	}
@@ -673,7 +575,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			checkAuth(err)
 			return
 		}
-		pol.set(resp.IntervalMinutes, resp.RetentionCount, resp.BackupPaths, resp.ChunkSizeBytes)
+		pol.set(resp.IntervalMinutes, resp.RetentionCount, resp.BackupPaths)
 	}
 	refreshPolicy()
 	go func() {
@@ -811,7 +713,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			go runBackup(protocol.SnapshotKindScheduled, nil)
 		}
 		for {
-			interval, _, _ := pol.snapshot()
+			interval, _ := pol.snapshot()
 			wait := time.Duration(interval) * time.Minute
 			if next := nextScheduledAt(); next != nil {
 				if d := time.Until(*next); d > 0 {
@@ -851,8 +753,6 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			switch env.Type {
 			case protocol.TypeBackupNow:
 				go runBackup(protocol.SnapshotKindManual, nil)
-			case protocol.TypeRestore:
-				go runRestore(env.SnapshotID)
 			case protocol.TypeCancel:
 				jobMu.Lock()
 				if jobCancel != nil {
@@ -877,7 +777,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 				if env.RetentionCount != nil {
 					retention = *env.RetentionCount
 				}
-				pol.set(interval, retention, env.BackupPaths, 0)
+				pol.set(interval, retention, env.BackupPaths)
 			}
 		}
 	}
@@ -890,7 +790,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 // process on the machine should stay minimal. A backup triggered here
 // goes through the exact same runBackup as a remote "Sauvegarder
 // maintenant" from the panel - the server's own commands (backup_now,
-// restore, cancel) are handled independently in the main WS loop and are
+// cancel) are handled independently in the main WS loop and are
 // never blocked or delayed by anything the tray does, which is what
 // keeps the server always authoritative.
 func startTrayControlAPI(

@@ -1,10 +1,14 @@
 // Package api implements the two REST surfaces the server exposes: the
-// agent-facing data plane (enrollment, chunk upload/download, manifests,
-// snapshot lifecycle - authenticated with a per-device secret) and the
-// panel-facing control surface (login, device/settings management -
+// agent-facing data plane (enrollment, the incremental backup plan, file
+// upload, snapshot lifecycle - authenticated with a per-device secret) and
+// the panel-facing control surface (login, device/settings management -
 // authenticated with a signed session cookie). Remote commands
-// (backup-now, restore) are dispatched to connected agents over the
-// WebSocket hub in internal/ws.
+// (backup-now, cancel, uninstall) are dispatched to connected agents over
+// the WebSocket hub in internal/ws.
+//
+// There is deliberately no restore surface here: backups are stored as
+// plain files on the NAS (see internal/filestore) and are restored by
+// copying them back by hand.
 package api
 
 import (
@@ -14,14 +18,14 @@ import (
 	"net/http"
 
 	"backup-server/internal/auth"
+	"backup-server/internal/filestore"
 	"backup-server/internal/queue"
-	"backup-server/internal/storage"
 	"backup-server/internal/ws"
 )
 
 type API struct {
 	DB           *sql.DB
-	Store        *storage.Holder
+	Store        *filestore.Holder
 	Hub          *ws.Hub
 	Sessions     *auth.SessionSigner
 	DownloadsDir string
@@ -35,7 +39,7 @@ type API struct {
 	AgentPort string
 }
 
-func New(db *sql.DB, store *storage.Holder, hub *ws.Hub, sessions *auth.SessionSigner,
+func New(db *sql.DB, store *filestore.Holder, hub *ws.Hub, sessions *auth.SessionSigner,
 	q *queue.Manager, downloadsDir, agentPort string) *API {
 	return &API{
 		DB: db, Store: store, Hub: hub, Sessions: sessions,
@@ -70,8 +74,8 @@ func decodeJSON(r *http.Request, v any) error {
 // - an operator can (and normally does) update one without the other in
 // the same minute. Rejecting an unknown field here means every additive,
 // backward-compatible protocol change (a new optional manifest field, say)
-// hard-fails every backup with a cryptic "manifeste invalide" the moment
-// an updated agent talks to a server that hasn't been redeployed yet.
+// hard-fails every backup with a cryptic error the moment an updated
+// agent talks to a server that hasn't been redeployed yet.
 func decodeJSONLenient(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }

@@ -1,7 +1,7 @@
 // Package osui provides the two small cross-platform, CGO-free ways the
 // agent reaches the user's screen: opening a local URL in the default
-// browser (used for both the first-run setup wizard and the live
-// backup/restore progress view) and firing a native "heads up" OS
+// browser (used for both the first-run setup wizard and the live backup
+// progress view) and firing a native "heads up" OS
 // notification. Deliberately not a custom native GUI toolkit - shelling
 // out to the OS's own opener and notifier is far more reliable across
 // Windows/macOS/Linux than bundling a GUI stack.

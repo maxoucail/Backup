@@ -238,17 +238,5 @@ func (h *Hub) handleIncoming(ac *agentConn, env Envelope) {
 			level = models.EventLevelError
 		}
 		_ = models.AddEvent(h.db, &deviceID, level, msg)
-
-	case TypeRestoreStarted:
-		_ = models.AddEvent(h.db, &deviceID, models.EventLevelInfo, "Restauration démarrée.")
-
-	case TypeRestoreFinished:
-		msg := "Restauration terminée avec succès."
-		level := models.EventLevelInfo
-		if env.Status != models.SnapshotStatusSuccess {
-			msg = "Restauration en échec : " + env.ErrorMessage
-			level = models.EventLevelError
-		}
-		_ = models.AddEvent(h.db, &deviceID, level, msg)
 	}
 }

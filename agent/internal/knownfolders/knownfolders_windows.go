@@ -27,14 +27,14 @@ import (
 // of HKEY_CURRENT_USER. Set by main.go when running as a LocalSystem
 // service: HKEY_CURRENT_USER inside that process is LocalSystem's own
 // hive, not the console user's, so it would silently resolve that account's
-// folders instead - which is how restored files ended up in
-// C:\Windows\System32\config\systemprofile where nobody could find them.
+// folders instead - the empty C:\Windows\System32\config\systemprofile
+// tree, backed up in place of everything the user actually has.
 var UserSID string
 
 // UserSIDFunc, when set, re-resolves the console user's SID on demand.
 //
 // A one-shot UserSID set at startup is not enough, and getting this wrong
-// is exactly what sent restores into the void: the service starts at boot,
+// backs up the wrong account entirely: the service starts at boot,
 // when nobody is logged in yet, so the initial lookup fails and UserSID
 // stays empty for the entire life of the service. Every later registry
 // read then silently falls back to HKEY_CURRENT_USER - the SYSTEM hive -
@@ -89,10 +89,9 @@ var errEmptyHome = errors.New("répertoire utilisateur vide")
 // Resolve returns the real, current path of a well-known folder ("Desktop",
 // "Downloads", "Documents", "Pictures"), following any redirection to
 // another drive. Returns "" if the current user's home can't be determined
-// at all; see ResolveErr for why a low-stakes caller (the backup-time
-// folder scan, which just skips what it can't find) can use this, and why
-// a caller where getting it wrong is dangerous (restore) must use
-// ResolveErr instead.
+// at all; see ResolveErr for why the backup-time folder scan, which just
+// skips what it can't find, can use this, and why a caller that needs to
+// tell "no such folder" apart from "couldn't look" must use ResolveErr.
 func Resolve(name string) string {
 	p, err := ResolveErr(name)
 	if err != nil {
@@ -163,8 +162,8 @@ func ResolveErr(name string) (string, error) {
 	// Last line of defence against a wrong-hive read: the registry just
 	// told us this user's folder lives inside a service account's profile.
 	// It doesn't - that answer came from SYSTEM's hive - and honouring it
-	// is precisely what makes restored files vanish somewhere the user
-	// can't see. The user's own profile is the trustworthy answer here.
+	// means backing up an empty service-account folder in place of the
+	// user's real one. The user's own profile is the trustworthy answer.
 	if IsServiceProfilePath(resolved) && !IsServiceProfilePath(home) {
 		return fallback, nil
 	}

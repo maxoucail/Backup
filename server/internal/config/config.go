@@ -21,7 +21,7 @@ type Config struct {
 	DownloadsDir  string
 	ListenHost    string
 	PanelPort     string // admin web panel: login, dashboard, settings, device management
-	AgentPort     string // agent traffic: enrollment, chunk upload/download, WebSocket control channel
+	AgentPort     string // agent traffic: enrollment, file upload, WebSocket control channel
 	SessionSecret string
 }
 

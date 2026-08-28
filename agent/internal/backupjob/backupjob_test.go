@@ -3,6 +3,7 @@ package backupjob
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,53 +17,67 @@ import (
 	"backup-agent/internal/scanner"
 )
 
-// fakeServer stands in for the backup server, letting a test decide which
-// chunk uploads fail - the situation a real agent hits when a file is
-// edited or locked between hashing and upload.
+// fakeServer stands in for the backup server: it records what the agent
+// announced and what it actually uploaded, and can decide which uploads
+// fail - the situation a real agent hits when a file is edited or locked
+// mid-run.
 type fakeServer struct {
-	rejectContaining string // uploads of chunks for files whose bytes contain this are refused
-	manifest         *protocol.Manifest
-	finishStatus     string
+	rejectContaining string // uploads whose bytes contain this are refused
+
+	mu           sync.Mutex
+	announced    []protocol.FileInfo
+	uploaded     map[string]string // relative path -> content
+	finishStatus string
+
+	// neededFilter, when set, decides what the plan asks for. Nil means
+	// "everything", as on a first backup.
+	neededFilter func(protocol.FileInfo) bool
 }
 
 func (f *fakeServer) start(t *testing.T) *client.Client {
 	t.Helper()
+	f.uploaded = map[string]string{}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/agent/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"snapshot_id": "snap-test"})
 	})
-	mux.HandleFunc("POST /api/agent/snapshots/{id}/check-chunks", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/agent/snapshots/{id}/plan", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Hashes []string `json:"hashes"`
+			Files []protocol.FileInfo `json:"files"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		// Server has nothing yet: every chunk needs uploading.
-		_ = json.NewEncoder(w).Encode(map[string][]string{"missing": req.Hashes})
+		f.mu.Lock()
+		f.announced = req.Files
+		f.mu.Unlock()
+
+		needed := []string{}
+		for _, file := range req.Files {
+			if f.neededFilter == nil || f.neededFilter(file) {
+				needed = append(needed, file.Path)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"needed": needed, "destination": "/mnt/nas/backups/PC-Test"})
 	})
-	mux.HandleFunc("PUT /api/agent/chunks/{hash}", func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, 4096)
-		n, _ := r.Body.Read(body)
-		if f.rejectContaining != "" && strings.Contains(string(body[:n]), f.rejectContaining) {
-			// Mirrors the real server refusing content that doesn't match
-			// the announced hash, i.e. a file that changed under us.
-			http.Error(w, "hash mismatch", http.StatusBadRequest)
+	mux.HandleFunc("PUT /api/agent/files", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if f.rejectContaining != "" && strings.Contains(string(body), f.rejectContaining) {
+			http.Error(w, "écriture refusée", http.StatusBadRequest)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]int{"bytes_written": n})
-	})
-	mux.HandleFunc("POST /api/agent/snapshots/{id}/manifest", func(w http.ResponseWriter, r *http.Request) {
-		var m protocol.Manifest
-		_ = json.NewDecoder(r.Body).Decode(&m)
-		f.manifest = &m
-		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+		f.mu.Lock()
+		f.uploaded[r.URL.Query().Get("path")] = string(body)
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]int{"bytes_written": len(body)})
 	})
 	mux.HandleFunc("POST /api/agent/snapshots/{id}/finish", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Status string `json:"status"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
 		f.finishStatus = req.Status
+		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
 	})
 
@@ -71,10 +86,80 @@ func (f *fakeServer) start(t *testing.T) *client.Client {
 	return client.New(srv.URL, "dev1", "secret")
 }
 
+func (f *fakeServer) uploadedPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for p := range f.uploaded {
+		out = append(out, p)
+	}
+	return out
+}
+
 func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// The point of the whole rewrite: a backup must cost only what changed.
+// If the agent re-uploads files the server already has, a machine with a
+// large photo library re-sends gigabytes every single run.
+func TestOnlyTheFilesTheServerAsksForAreUploaded(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ancien.txt", "inchangé depuis la dernière sauvegarde")
+	writeFile(t, dir, "nouveau.txt", "ce fichier vient d'être créé")
+
+	srv := &fakeServer{
+		neededFilter: func(f protocol.FileInfo) bool { return strings.HasSuffix(f.Path, "nouveau.txt") },
+	}
+	c := srv.start(t)
+
+	res, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, nil)
+	if err != nil {
+		t.Fatalf("la sauvegarde a échoué: %v", err)
+	}
+
+	// Everything is announced - that's how the server knows what the
+	// machine holds, and what it no longer holds.
+	if len(srv.announced) != 2 {
+		t.Fatalf("fichiers annoncés = %d, attendu 2", len(srv.announced))
+	}
+	paths := srv.uploadedPaths()
+	if len(paths) != 1 || !strings.HasSuffix(paths[0], "nouveau.txt") {
+		t.Fatalf("fichiers envoyés = %v, attendu uniquement nouveau.txt", paths)
+	}
+	if res.FileCount != 2 {
+		t.Fatalf("fichiers sauvegardés = %d, attendu 2 (le total protégé, pas seulement l'envoi)", res.FileCount)
+	}
+	if srv.finishStatus != protocol.SnapshotStatusSuccess {
+		t.Fatalf("statut final = %q, attendu %q", srv.finishStatus, protocol.SnapshotStatusSuccess)
+	}
+}
+
+// A machine where nothing changed must still report a successful backup:
+// its copy on the NAS is genuinely up to date, and reporting a failure
+// would train an operator to ignore failures.
+func TestBackupSucceedsWhenServerNeedsNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stable.txt", "rien n'a bougé")
+
+	srv := &fakeServer{neededFilter: func(protocol.FileInfo) bool { return false }}
+	c := srv.start(t)
+
+	res, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, nil)
+	if err != nil {
+		t.Fatalf("une sauvegarde sans rien à envoyer doit réussir: %v", err)
+	}
+	if res.UploadedBytes != 0 {
+		t.Fatalf("octets envoyés = %d, attendu 0", res.UploadedBytes)
+	}
+	if len(srv.uploadedPaths()) != 0 {
+		t.Fatalf("aucun envoi attendu, obtenu %v", srv.uploadedPaths())
+	}
+	if srv.finishStatus != protocol.SnapshotStatusSuccess {
+		t.Fatalf("statut final = %q, attendu %q", srv.finishStatus, protocol.SnapshotStatusSuccess)
 	}
 }
 
@@ -90,10 +175,7 @@ func TestBackupSkipsUnreadableFileAndKeepsTheRest(t *testing.T) {
 	srv := &fakeServer{rejectContaining: "FICHIER-VERROUILLE"}
 	c := srv.start(t)
 
-	// Isolate the manifest cache from the developer's real one.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	res, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, 16*1024*1024, nil)
+	res, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, nil)
 	if err != nil {
 		t.Fatalf("la sauvegarde a échoué alors qu'un seul fichier posait problème: %v", err)
 	}
@@ -104,19 +186,11 @@ func TestBackupSkipsUnreadableFileAndKeepsTheRest(t *testing.T) {
 	if !strings.Contains(res.SkippedFiles[0], "boite-mail.pst") {
 		t.Fatalf("fichier ignoré = %q, attendu boite-mail.pst", res.SkippedFiles[0])
 	}
-	if res.FileCount != 2 {
-		t.Fatalf("fichiers sauvegardés = %d, attendu 2", res.FileCount)
+	if len(srv.uploadedPaths()) != 2 {
+		t.Fatalf("fichiers envoyés = %v, attendu les 2 fichiers lisibles", srv.uploadedPaths())
 	}
 	if srv.finishStatus != protocol.SnapshotStatusSuccess {
 		t.Fatalf("statut final = %q, attendu %q", srv.finishStatus, protocol.SnapshotStatusSuccess)
-	}
-
-	// The manifest must not reference the file whose data never landed,
-	// otherwise a restore would fail on it.
-	for _, f := range srv.manifest.Files {
-		if strings.Contains(f.Path, "boite-mail.pst") {
-			t.Fatal("le manifeste référence un fichier dont les données n'ont pas été envoyées")
-		}
 	}
 }
 
@@ -124,9 +198,9 @@ func TestBackupSkipsUnreadableFileAndKeepsTheRest(t *testing.T) {
 // snapshot creation carrying the snapshot ID: the server only persists a
 // progress update when it can attach it to a row (see ws.Hub.handleIncoming),
 // so a callback missing SnapshotID is silently dropped rather than shown.
-// Without it, the panel shows nothing until the manifest and finish calls
-// land at the very end - the whole backup looking stuck at 0% until it
-// suddenly completes.
+// Without it, the panel shows nothing until the finish call lands at the
+// very end - the whole backup looking stuck at 0% until it suddenly
+// completes.
 func TestProgressCallbacksCarryTheSnapshotID(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "un peu de contenu")
@@ -134,7 +208,6 @@ func TestProgressCallbacksCarryTheSnapshotID(t *testing.T) {
 
 	srv := &fakeServer{}
 	c := srv.start(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	var mu sync.Mutex
 	var calls []Progress
@@ -144,7 +217,7 @@ func TestProgressCallbacksCarryTheSnapshotID(t *testing.T) {
 		calls = append(calls, p)
 	}
 
-	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, 16*1024*1024, onProgress); err != nil {
+	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, onProgress); err != nil {
 		t.Fatalf("la sauvegarde a échoué: %v", err)
 	}
 
@@ -163,8 +236,7 @@ func TestProgressCallbacksCarryTheSnapshotID(t *testing.T) {
 	}
 }
 
-// If nothing at all could be uploaded, reporting success would be a lie -
-// the snapshot would restore to an empty set.
+// If nothing at all could be sent, reporting success would be a lie.
 func TestBackupFailsWhenNoFileCouldBeSaved(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "TOUT-ECHOUE un")
@@ -172,9 +244,8 @@ func TestBackupFailsWhenNoFileCouldBeSaved(t *testing.T) {
 
 	srv := &fakeServer{rejectContaining: "TOUT-ECHOUE"}
 	c := srv.start(t)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, 16*1024*1024, nil); err == nil {
+	if _, err := Run(context.Background(), c, protocol.SnapshotKindManual, []scanner.Root{{Path: dir}}, nil); err == nil {
 		t.Fatal("une sauvegarde dont aucun fichier n'a pu être envoyé doit échouer")
 	}
 	if srv.finishStatus != protocol.SnapshotStatusFailed {

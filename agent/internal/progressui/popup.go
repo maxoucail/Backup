@@ -1,5 +1,5 @@
 // Package progressui shows a live progress popup on the user's screen for
-// a manually or remotely triggered backup/restore: a tiny local web page,
+// a manually or remotely triggered backup: a tiny local web page,
 // auto-opened in the default browser, polling an in-memory state this
 // package exposes. Routine scheduled backups run silently and never open
 // this - it's reserved for the case the user (or the operator, from the

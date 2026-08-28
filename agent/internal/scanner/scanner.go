@@ -2,15 +2,15 @@
 // either the operator's default set of well-known user folders (Desktop,
 // Downloads, Documents, Pictures) or a custom list pushed from the panel.
 //
-// Files from a well-known folder are recorded in the manifest under that
-// folder's *logical* name ("Downloads/facture.pdf"), never its physical
-// location. On Windows those folders are routinely redirected to another
-// drive, so the physical location is a property of one machine at one
-// moment in time - useless, and actively harmful, as the thing to restore
-// against. Keeping the logical name means a restore just re-resolves
-// "Downloads" on the target machine (registry lookup, see the
-// knownfolders package) and puts the file back in that user's real
-// Downloads folder, wherever it happens to live now.
+// Files from a well-known folder are announced under that folder's
+// *logical* name ("Downloads/facture.pdf"), never its physical location,
+// and that is the path they get on the NAS. On Windows those folders are
+// routinely redirected to another drive, so the physical location is a
+// property of one machine at one moment in time: naming the backup after
+// it would put "E/Downloads" on the NAS this month and "C/Users/x/
+// Downloads" the next, splitting one folder's history in two. The logical
+// name keeps the machine's tree on the NAS stable and readable - open the
+// PC's folder, open Downloads, the files are there.
 package scanner
 
 import (
@@ -44,11 +44,11 @@ var excludedDirNames = map[string]bool{
 }
 
 // Root is one directory to walk, plus the logical name its files should be
-// recorded under. Name is one of defaultFolderNames for a well-known user
-// folder - the case where the physical path must not end up in the
-// manifest - and empty for an arbitrary operator-configured path, which
-// has no logical identity to restore against and falls back to a
-// home-relative (or, failing that, absolute) path.
+// stored under on the NAS. Name is one of defaultFolderNames for a
+// well-known user folder - the case where the physical path must not end
+// up in the stored tree - and empty for an arbitrary operator-configured
+// path, which has no logical identity and falls back to a home-relative
+// (or, failing that, absolute) path.
 type Root struct {
 	Path string
 	Name string
@@ -138,10 +138,10 @@ func pathsEqual(a, b string) bool {
 
 type FileEntry struct {
 	AbsPath string
-	// RelPath is where this file is recorded in the manifest, forward-slash
-	// separated: "<logical folder>/<path within it>" for a well-known
-	// folder, a home-relative path otherwise, or the _outside fallback when
-	// it's neither.
+	// RelPath is where this file lands inside the machine's folder on the
+	// NAS, forward-slash separated: "<logical folder>/<path within it>"
+	// for a well-known folder, a home-relative path otherwise, or the
+	// _outside fallback when it's neither.
 	RelPath string
 	Size    int64
 	ModTime int64 // unix seconds
@@ -219,23 +219,25 @@ func isOutside(rel string) bool {
 
 const outsideHomePrefix = "_outside/"
 
-// relPath decides how a file is recorded in the manifest.
+// relPath decides where a file lands inside the machine's folder on the
+// NAS.
 //
 // A file from a well-known folder is stored under that folder's logical
-// name, so its physical location never enters the manifest at all and a
-// restore can re-resolve the folder on whatever machine it runs on.
+// name, so its physical location never enters the stored tree and the
+// folder keeps one stable home on the NAS even if it's moved to another
+// drive on the PC.
 //
 // Otherwise it's stored relative to home. Only a file that is neither -
 // an operator-configured path outside the home directory - falls back to
 // the "_outside" namespace. That fallback exists because on Windows
 // filepath.Rel returns an error for two paths on different volumes, so
 // the naive result would be the raw absolute path itself (e.g.
-// "E:\Projets\x.txt"), which at restore time gets joined onto a directory
-// rather than resolved as a fresh root, producing a literal "E:" path
-// segment that every Windows API rejects ("La syntaxe du nom de
-// fichier... est incorrecte"). sanitizeSegment strips the colon so such a
-// file still restores somewhere valid; backupjob additionally records its
-// real AbsPath so restore can prefer the original location when it exists.
+// "E:\Projets\x.txt"), which gets joined onto the machine's folder on the
+// server rather than resolved as a fresh root, producing a literal "E:"
+// path segment that every Windows API rejects ("La syntaxe du nom de
+// fichier... est incorrecte"). sanitizeSegment strips the colon so the
+// file lands under a plain "_outside/E/Projets/x.txt" on the NAS, which an
+// operator can read and copy back like anything else.
 func relPath(root Root, home, abs string) string {
 	if root.Name != "" {
 		if r, err := filepath.Rel(root.Path, abs); err == nil && !isOutside(r) {
@@ -248,89 +250,6 @@ func relPath(root Root, home, abs string) string {
 		}
 	}
 	return outsideHomePrefix + sanitizeSegment(filepath.ToSlash(abs))
-}
-
-// IsOutsideHome reports whether a RelPath produced by Walk is the
-// _outside-namespaced fallback rather than a logical or home-relative
-// path - the signal backupjob uses to also record the file's real
-// original AbsPath, so restore can try putting it back where it actually
-// was instead of only ever under a fallback directory.
-func IsOutsideHome(relPath string) bool {
-	return strings.HasPrefix(relPath, outsideHomePrefix)
-}
-
-// ResolveKnownFolders resolves every well-known folder once, up front, for
-// reuse across every file in a restore. A folder whose resolution fails
-// (Windows Service with nobody logged in at the console right now, a
-// registry read that hiccups) is simply omitted rather than falling back
-// to some other guess - see knownfolders.ResolveErr for why that matters.
-//
-// Resolving once and reusing it, rather than fresh per file, is itself
-// part of what makes restore reliable: a Windows Service restoring many
-// files at once (see restoreConcurrency in restorejob) would otherwise
-// repeat an expensive WTS-token-plus-registry lookup once per file at
-// concurrency - exactly the kind of repeated call under load where a
-// transient OS-level failure shows up - and a fresh independent failure
-// per file meant it could silently affect only some files in an
-// otherwise-successful restore: correct for most files, files from that
-// one folder quietly missing, on some machines and not others.
-func ResolveKnownFolders() map[string]string {
-	out := make(map[string]string, len(defaultFolderNames))
-	for _, name := range defaultFolderNames {
-		p, err := knownfolders.ResolveErr(name)
-		if err != nil || p == "" || !filepath.IsAbs(p) {
-			continue
-		}
-		// A folder that resolved into a service account's own profile is
-		// a wrong answer, not a usable one: those files would be
-		// invisible to the user. Dropping it here means the restore
-		// treats the folder as unresolved and falls back to somewhere
-		// real, instead of writing into the void.
-		if knownfolders.IsServiceProfilePath(p) {
-			log.Printf("scanner: dossier %q résolu dans le profil d'un compte de service (%s), ignoré", name, p)
-			continue
-		}
-		out[name] = p
-	}
-	return out
-}
-
-// KnownFolderDest maps a manifest path back to an absolute destination on
-// *this* machine when its first segment names a well-known user folder
-// already resolved into resolved (see ResolveKnownFolders): "Downloads/
-// facture.pdf" becomes this user's real Downloads folder plus
-// "facture.pdf". This is what puts a restored file back where it belongs
-// even if the folder has been moved to another drive since - on this
-// machine or on the replacement machine the snapshot was moved to.
-//
-// Returns ok=false for a path that doesn't start with a known folder, or
-// whose folder isn't in resolved - failing closed there (rather than
-// falling back to some other guess) means the caller sees an ordinary
-// "couldn't restore this file" instead of a restore that reports success
-// while the file vanishes into a directory the user can't see.
-func KnownFolderDest(resolved map[string]string, manifestPath string) (string, bool) {
-	clean := path.Clean(filepath.ToSlash(manifestPath))
-	first, rest, _ := strings.Cut(clean, "/")
-	dir, ok := resolved[first]
-	if !ok {
-		return "", false
-	}
-	if rest == "" {
-		return dir, true
-	}
-	// filepath.Join cleans the remainder, so a "../" smuggled into a
-	// manifest can't climb out of the resolved folder.
-	dest := filepath.Join(dir, filepath.FromSlash(rest))
-	if !within(dir, dest) {
-		return "", false
-	}
-	return dest, true
-}
-
-// within reports whether dest stays inside dir.
-func within(dir, dest string) bool {
-	rel, err := filepath.Rel(dir, dest)
-	return err == nil && !isOutside(rel)
 }
 
 // sanitizeSegment strips characters that are illegal inside a path

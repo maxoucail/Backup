@@ -10,10 +10,9 @@ import (
 //
 // A user folder must never resolve inside one. Those are the paths a
 // wrong-hive registry read produces - a LocalSystem service reading
-// HKEY_CURRENT_USER gets SYSTEM's own folders - and they are invisible to
-// the logged-in user, often not even browsable without elevation. A
-// restore that writes there reports success while the files effectively
-// disappear, which is the exact failure this guard exists to stop.
+// HKEY_CURRENT_USER gets SYSTEM's own folders - and they are empty: a
+// backup that walks them reports success having saved nothing of the
+// user's, which is the exact failure this guard exists to stop.
 var serviceProfileMarkers = []string{
 	`\config\systemprofile`,
 	`\serviceprofiles\localservice`,
@@ -25,10 +24,8 @@ var serviceProfileMarkers = []string{
 //
 // Deliberately not build-tagged to Windows: these are path *patterns*, not
 // OS behaviour, and a genuine Unix path can't accidentally match one.
-// Keeping it cross-platform means the restore path can apply the same
-// refusal everywhere - including to paths cached by an older agent build
-// that recorded them before this guard existed - and that the guard is
-// testable off Windows.
+// Keeping it cross-platform means the same refusal applies everywhere, and
+// that the guard is testable off Windows.
 func IsServiceProfilePath(p string) bool {
 	if p == "" {
 		return false

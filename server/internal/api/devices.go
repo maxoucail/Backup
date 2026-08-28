@@ -1,13 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 
+	"backup-server/internal/filestore"
 	"backup-server/internal/models"
-	"backup-server/internal/storage"
 	"backup-server/internal/ws"
 )
 
@@ -16,6 +19,10 @@ type deviceView struct {
 	Online         bool             `json:"online"`
 	LatestSnapshot *models.Snapshot `json:"latest_snapshot,omitempty"`
 	SnapshotCount  int              `json:"snapshot_count"`
+	// StorageDir is where this machine's files actually sit on the NAS.
+	// Restoring means opening this folder and copying back what's needed,
+	// so the panel shows it rather than making an operator guess.
+	StorageDir string `json:"storage_dir"`
 }
 
 func (a *API) toDeviceView(d models.Device) deviceView {
@@ -26,6 +33,7 @@ func (a *API) toDeviceView(d models.Device) deviceView {
 		Online:         a.Hub.IsOnline(d.ID),
 		LatestSnapshot: latest,
 		SnapshotCount:  len(snaps),
+		StorageDir:     a.Store.Get().DeviceDir(d.ID, d.Name),
 	}
 }
 
@@ -77,24 +85,76 @@ func (a *API) handleUpdateDevice(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusNotFound, "appareil introuvable")
 		return
 	}
+	// Decoded twice on purpose: once into the typed request, and once into
+	// a bare map so we can tell "field omitted" from "field explicitly set
+	// to null". A pointer field is nil in both cases, and treating the
+	// first as the second is what made a simple rename wipe the machine's
+	// configured folder list.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "requête invalide")
+		return
+	}
 	var req updateDeviceRequest
-	if err := decodeJSON(r, &req); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "requête invalide")
+		return
+	}
+	var present map[string]json.RawMessage
+	if err := json.Unmarshal(body, &present); err != nil {
 		writeError(w, http.StatusBadRequest, "requête invalide")
 		return
 	}
 	if req.Name != nil && *req.Name != "" {
+		// The machine's folder on the NAS is named after the device, so
+		// the rename has to happen on disk too - otherwise the existing
+		// backup is stranded under the old name and the next run starts
+		// from scratch.
+		current, err2 := models.GetDevice(a.DB, id)
+		if err2 != nil {
+			writeError(w, http.StatusNotFound, "appareil introuvable")
+			return
+		}
+		store := a.Store.Get()
+		oldDir := store.DeviceDir(current.ID, current.Name)
+		newDir := store.DeviceDir(current.ID, *req.Name)
+		if err := store.RenameDevice(oldDir, newDir); err != nil {
+			writeError(w, http.StatusConflict, "renommage du dossier de sauvegarde impossible: "+err.Error())
+			return
+		}
 		if err := models.RenameDevice(a.DB, id, *req.Name); err != nil {
+			// Put the folder back: the name in the database is what every
+			// later path is derived from, so the two must not diverge.
+			_ = store.RenameDevice(newDir, oldDir)
 			writeError(w, http.StatusInternalServerError, "erreur serveur")
 			return
 		}
 	}
 
-	pathsJSON := ""
-	if req.BackupPaths != nil {
-		b, _ := json.Marshal(req.BackupPaths)
-		pathsJSON = string(b)
+	set := map[string]any{}
+	if _, ok := present["interval_minutes"]; ok {
+		set["interval_minutes"] = nullableInt(req.IntervalMinutes)
 	}
-	if err := models.UpdateDevicePolicy(a.DB, id, req.IntervalMinutes, req.RetentionCount, pathsJSON); err != nil {
+	if _, ok := present["retention_count"]; ok {
+		// Below two, a machine's only copy is the mirror being overwritten;
+		// see filestore and scheduler.minRetention.
+		if req.RetentionCount != nil && *req.RetentionCount < 2 {
+			writeError(w, http.StatusBadRequest, "le nombre d'états à conserver doit être au moins 2")
+			return
+		}
+		set["retention_count"] = nullableInt(req.RetentionCount)
+	}
+	if _, ok := present["backup_paths"]; ok {
+		pathsJSON := ""
+		if req.BackupPaths != nil {
+			b, _ := json.Marshal(req.BackupPaths)
+			pathsJSON = string(b)
+		}
+		set["backup_paths"] = pathsJSON
+	}
+	if err := models.UpdateDevicePolicy(a.DB, id, set); err != nil {
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
 	}
@@ -120,22 +180,26 @@ func (a *API) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id stri
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
+// deleteDeviceAndReclaim forgets a machine and deletes its folder on the
+// NAS, previous versions included. Nothing is shared between machines -
+// each one owns its own tree - so there is nothing left to collect
+// afterwards.
 func (a *API) deleteDeviceAndReclaim(id string) error {
-	snapshots, err := models.ListSnapshotsForDevice(a.DB, id, 100000)
+	device, err := models.GetDevice(a.DB, id)
 	if err != nil {
 		return err
 	}
 	store := a.Store.Get()
-	for _, s := range snapshots {
-		_ = storage.DeleteManifest(s.ManifestPath)
-	}
+	deviceDir := store.DeviceDir(device.ID, device.Name)
 	if err := models.DeleteDevice(a.DB, id); err != nil {
 		return err
 	}
+	// Deleting several gigabytes over a network mount can take a while;
+	// the panel shouldn't hang on it, and the database is already the
+	// authority on which machines exist.
 	go func() {
-		remaining, err := models.AllManifestPaths(a.DB)
-		if err == nil {
-			_, _, _ = store.GarbageCollect(remaining, storage.GraceCutoff())
+		if err := store.RemoveDevice(deviceDir); err != nil {
+			log.Printf("suppression du dossier %s: %v", deviceDir, err)
 		}
 	}()
 	return nil
@@ -190,33 +254,6 @@ func (a *API) handleBackupNow(w http.ResponseWriter, r *http.Request, id string)
 	writeJSON(w, http.StatusAccepted, map[string]string{"ok": "true"})
 }
 
-type restoreRequest struct {
-	SnapshotID string `json:"snapshot_id"`
-}
-
-func (a *API) handleRestore(w http.ResponseWriter, r *http.Request, id string) {
-	var req restoreRequest
-	if err := decodeJSON(r, &req); err != nil || req.SnapshotID == "" {
-		writeError(w, http.StatusBadRequest, "sauvegarde cible manquante")
-		return
-	}
-	snap, err := models.GetSnapshot(a.DB, req.SnapshotID)
-	if err != nil || snap.DeviceID != id {
-		writeError(w, http.StatusNotFound, "sauvegarde introuvable")
-		return
-	}
-	if snap.Status != models.SnapshotStatusSuccess {
-		writeError(w, http.StatusBadRequest, "cette sauvegarde n'est pas utilisable pour une restauration")
-		return
-	}
-	if !a.Hub.SendCommand(id, ws.Envelope{Type: ws.TypeRestore, SnapshotID: req.SnapshotID}) {
-		writeError(w, http.StatusConflict, "l'appareil n'est pas connecté")
-		return
-	}
-	_ = models.AddEvent(a.DB, &id, models.EventLevelInfo, "Restauration demandée depuis le panneau.")
-	writeJSON(w, http.StatusAccepted, map[string]string{"ok": "true"})
-}
-
 func (a *API) handleCancelJob(w http.ResponseWriter, r *http.Request, id string) {
 	if !a.Hub.SendCommand(id, ws.Envelope{Type: ws.TypeCancel}) {
 		writeError(w, http.StatusConflict, "l'appareil n'est pas connecté")
@@ -225,13 +262,14 @@ func (a *API) handleCancelJob(w http.ResponseWriter, r *http.Request, id string)
 	writeJSON(w, http.StatusAccepted, map[string]string{"ok": "true"})
 }
 
-// handleDeleteSnapshot removes one backup on its own, outside the usual
-// retention rotation - an operator deciding a particular snapshot is
-// pointless (a test run, one taken right before a big cleanup) shouldn't
-// have to wait for it to age out. A snapshot still running is refused: it
-// has no manifest yet, and deleting its DB row out from under an agent
-// mid-upload would strand the queue slot models.DeleteSnapshot alone
-// doesn't know to release.
+// handleDeleteSnapshot removes one line from a machine's backup history.
+//
+// This is a history entry, not the files: the backup itself is the
+// machine's folder on the NAS, which the next backup keeps up to date. To
+// free actual disk space, delete a previous version instead (see
+// handleDeleteVersion). A snapshot still running is refused - deleting its
+// row out from under an agent mid-upload would strand the queue slot
+// models.DeleteSnapshot alone doesn't know to release.
 func (a *API) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request, deviceID, snapshotID string) {
 	snap, err := models.GetSnapshot(a.DB, snapshotID)
 	if err != nil || snap.DeviceID != deviceID {
@@ -242,83 +280,82 @@ func (a *API) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request, devic
 		writeError(w, http.StatusConflict, "impossible de supprimer une sauvegarde en cours")
 		return
 	}
-
-	if err := storage.DeleteManifest(snap.ManifestPath); err != nil {
-		writeError(w, http.StatusInternalServerError, "erreur serveur")
-		return
-	}
 	if err := models.DeleteSnapshot(a.DB, snapshotID); err != nil {
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
 	}
-	_ = models.AddEvent(a.DB, &deviceID, models.EventLevelInfo, "Sauvegarde supprimée depuis le panneau.")
-
-	// Runs after the response is sent for the same reason as retention
-	// rotation: GC walks the whole chunk store, which can take a while on
-	// a large repository and shouldn't make the delete button hang.
-	go func() {
-		store := a.Store.Get()
-		remaining, err := models.AllManifestPaths(a.DB)
-		if err == nil {
-			_, _, _ = store.GarbageCollect(remaining, storage.GraceCutoff())
-		}
-	}()
-
+	_ = models.AddEvent(a.DB, &deviceID, models.EventLevelInfo, "Ligne d'historique de sauvegarde supprimée depuis le panneau.")
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
-type reassignSnapshotRequest struct {
-	TargetDeviceID string `json:"target_device_id"`
+// versionView describes one previous version of a machine's files as the
+// panel shows it: a name that reads as a date, the folder to open on the
+// NAS, and what it costs on disk.
+type versionView struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
 }
 
-// handleReassignSnapshot moves a snapshot to a different device so it can
-// be restored there - the scenario this exists for is a machine that died
-// or was replaced: its last backup is still good, but a snapshot could
-// previously only ever be restored on the exact device that created it.
-// Chunks are content-addressed and already shared across the whole fleet,
-// so there's nothing to re-upload; this just repoints the snapshot's
-// ownership. Decommissioning a device deletes its snapshots outright (see
-// handleDecommissionDevice), so anything worth keeping has to be
-// reassigned first, while the old device record still exists.
-func (a *API) handleReassignSnapshot(w http.ResponseWriter, r *http.Request, deviceID, snapshotID string) {
-	snap, err := models.GetSnapshot(a.DB, snapshotID)
-	if err != nil || snap.DeviceID != deviceID {
-		writeError(w, http.StatusNotFound, "sauvegarde introuvable")
-		return
-	}
-	if snap.Status == models.SnapshotStatusRunning {
-		writeError(w, http.StatusConflict, "impossible de déplacer une sauvegarde en cours")
-		return
-	}
-
-	var req reassignSnapshotRequest
-	if err := decodeJSON(r, &req); err != nil || req.TargetDeviceID == "" {
-		writeError(w, http.StatusBadRequest, "appareil cible manquant")
-		return
-	}
-	if req.TargetDeviceID == deviceID {
-		writeError(w, http.StatusBadRequest, "l'appareil cible doit être différent de l'appareil actuel")
-		return
-	}
-	target, err := models.GetDevice(a.DB, req.TargetDeviceID)
+// handleListVersions reports what's actually on the NAS for one machine:
+// the live mirror (its up-to-date copy) plus every previous version kept
+// by retention. This is the panel's answer to "where do I go to get my
+// files back", so it deals in folders on disk, not database rows.
+func (a *API) handleListVersions(w http.ResponseWriter, r *http.Request, id string) {
+	device, err := models.GetDevice(a.DB, id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "appareil cible introuvable")
+		writeError(w, http.StatusNotFound, "appareil introuvable")
 		return
 	}
+	store := a.Store.Get()
+	deviceDir := store.DeviceDir(device.ID, device.Name)
 
-	if err := models.ReassignSnapshot(a.DB, snapshotID, req.TargetDeviceID); err != nil {
-		writeError(w, http.StatusInternalServerError, "erreur serveur")
+	versions := make([]versionView, 0)
+	for _, name := range store.ListVersions(deviceDir) {
+		dir, err := store.VersionDir(deviceDir, name)
+		if err != nil {
+			continue
+		}
+		versions = append(versions, versionView{
+			Name:      name,
+			Path:      dir,
+			SizeBytes: store.DeviceUsedBytes(dir),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"storage_dir":     deviceDir,
+		"used_bytes":      store.DeviceUsedBytes(deviceDir),
+		"versions":        versions,
+		"versions_folder": filestore.VersionsDirName,
+	})
+}
+
+// handleDeleteVersion drops one previous version. The live mirror is never
+// touched here: it is the machine's current backup, and there is no
+// situation where deleting it from the panel is what an operator meant.
+func (a *API) handleDeleteVersion(w http.ResponseWriter, r *http.Request, id, name string) {
+	device, err := models.GetDevice(a.DB, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "appareil introuvable")
 		return
 	}
-
-	sourceName := deviceID
-	if source, err := models.GetDevice(a.DB, deviceID); err == nil {
-		sourceName = source.Name
+	store := a.Store.Get()
+	deviceDir := store.DeviceDir(device.ID, device.Name)
+	if err := store.RemoveVersion(deviceDir, name); err != nil {
+		writeError(w, http.StatusBadRequest, "suppression impossible: "+err.Error())
+		return
 	}
-	_ = models.AddEvent(a.DB, &deviceID, models.EventLevelInfo,
-		fmt.Sprintf("Sauvegarde déplacée vers l'appareil %q pour restauration.", target.Name))
-	_ = models.AddEvent(a.DB, &req.TargetDeviceID, models.EventLevelInfo,
-		fmt.Sprintf("Sauvegarde reçue depuis l'appareil %q, disponible pour restauration.", sourceName))
-
+	_ = models.AddEvent(a.DB, &id, models.EventLevelInfo,
+		fmt.Sprintf("Ancienne version %q supprimée depuis le panneau.", name))
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
+// nullableInt turns an absent value into SQL NULL, which is how a device
+// says "use the server default" for a policy field.
+func nullableInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }

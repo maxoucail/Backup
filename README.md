@@ -1,11 +1,31 @@
 # Backup Center
 
-Système de sauvegarde centralisé façon Proxmox Backup Server / Time Machine :
-un **serveur** à installer sur votre NAS/Debian 13, avec panneau
-d'administration web, et des **agents** légers pour Windows 11 et macOS qui
-sauvegardent automatiquement les dossiers utilisateur (Bureau, Documents,
-Images, Téléchargements) vers ce serveur, de façon incrémentale et
-déduplicquée.
+Système de sauvegarde centralisé : un **serveur** à installer sur votre
+NAS/Debian 13, avec panneau d'administration web, et des **agents** légers
+pour Windows 11 et macOS qui sauvegardent automatiquement les dossiers
+utilisateur (Bureau, Documents, Images, Téléchargements) vers ce serveur,
+de façon incrémentale.
+
+**Les fichiers sont stockés en clair sur le NAS**, dans un dossier par
+ordinateur qui reproduit l'arborescence de la machine :
+
+```
+/mnt/nas/backups/
+└── PC-Max-2e3e4bb2/                 <- un dossier par ordinateur
+    ├── Bureau/
+    │   └── rapport.docx             <- la sauvegarde à jour
+    ├── Documents/
+    │   └── factures/2026.pdf
+    └── _anciennes_versions/
+        ├── 2026-08-20_14-30/        <- l'état précédent, complet
+        └── 2026-08-19_14-30/
+```
+
+Pour restaurer : ouvrez le dossier de la machine, copiez ce dont vous avez
+besoin, collez-le sur le poste. Il n'y a **pas de fonction de
+restauration** dans le logiciel, et c'est délibéré : pas de format
+propriétaire, pas d'index à reconstruire, rien qui exige que ce logiciel
+tourne encore le jour où vous en avez besoin.
 
 Écrit en **Go** : un seul binaire statique par composant, quelques
 millisecondes de démarrage, quelques Mo de RAM au repos, et une
@@ -21,28 +41,36 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
 
 ## Fonctionnement en bref
 
-- **Sauvegarde incrémentale réelle** : chaque fichier est identifié par son
-  empreinte SHA-256 et, pour les gros fichiers, découpé en blocs adressés
-  par leur propre empreinte. Un fichier inchangé (taille + date de
-  modification identiques) n'est même pas relu. Seuls les blocs que le
-  serveur ne possède **encore par personne** sont transférés - la
-  déduplication est globale, pas seulement par appareil.
-- **Rétention façon Proxmox** : on choisit dans le panneau combien de
-  sauvegardes garder par appareil ; la plus ancienne est purgée
-  automatiquement dès que la limite est dépassée, et l'espace disque
-  correspondant est récupéré (garbage collection des blocs orphelins).
+- **Sauvegarde incrémentale** : l'agent annonce au serveur tout ce que la
+  machine contient (chemin, taille, date de modification) ; le serveur
+  compare avec ce qu'il a déjà sur le NAS et ne redemande que les fichiers
+  nouveaux ou modifiés. Une photothèque de 4 Go inchangée n'est jamais
+  retransférée, ni réécrite.
+- **Anciennes versions quasi gratuites** : avant chaque mise à jour, l'état
+  courant est conservé dans `_anciennes_versions/<date>/`. Chaque version
+  est une arborescence complète et navigable, mais un fichier inchangé y
+  est un **lien physique** : il n'occupe la place qu'une seule fois, quel
+  que soit le nombre de versions qui le référencent. (Sur un montage
+  SMB/CIFS qui refuse les liens physiques, le serveur recopie côté serveur
+  - plus de disque, mais toujours aucun transfert réseau.)
+- **Rétention rotative, jamais à vide** : on choisit combien d'états garder
+  par appareil (**minimum 2** : la sauvegarde à jour + au moins une version
+  précédente). La nouvelle version est créée **avant** que quoi que ce soit
+  ne soit écrasé, et la plus ancienne n'est supprimée qu'**après** la fin
+  de la nouvelle sauvegarde : il reste toujours au moins une sauvegarde
+  intacte, à tout instant.
 - **Identification définitive** : au premier démarrage, l'agent demande
   l'adresse du serveur et une clé d'enrôlement à usage unique générée
   depuis le panneau. Une fois connecté, l'appareil est administré à
-  distance en permanence (renommage, politique, sauvegarde/restauration à
-  la demande) sans jamais redemander la clé.
+  distance en permanence (renommage, politique, sauvegarde à la demande)
+  sans jamais redemander la clé.
 - **Base de données bornée** : SQLite stocke les comptes, appareils,
   sauvegardes et un historique d'événements ; ce dernier est purgé
   automatiquement (par ancienneté et par nombre de lignes maximum,
   réglable) pour que la base ne grossisse pas indéfiniment.
 - **Popup de progression à distance** : un déclenchement manuel ou distant
-  (« Sauvegarder maintenant », « Restaurer ») ouvre sur l'écran de
-  l'appareil une page locale avec barre de progression et temps restant.
+  (« Sauvegarder maintenant ») ouvre sur l'écran de l'appareil une page
+  locale avec barre de progression et temps restant.
   Les sauvegardes planifiées, elles, tournent silencieusement en arrière-plan.
 - **Service système, pas une appli qu'on ferme** : l'agent s'installe comme
   un vrai service (Service Windows / LaunchDaemon macOS), démarre dès
@@ -73,15 +101,16 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
   pour sauvegarder le bon dossier plutôt que de supposer qu'il est resté
   sous `C:\Users\...`. On peut aussi forcer des chemins précis par
   appareil depuis le panneau, y compris sur un autre disque.
-- **Restauration par emplacement logique** : un fichier est enregistré
-  sous le nom de son dossier (`Téléchargements/facture.pdf`), jamais sous
-  son emplacement physique. À la restauration, l'agent relit le registre
-  de la machine cible et remet le fichier dans le vrai dossier
-  Téléchargements de cet utilisateur — même s'il a été déplacé sur un
-  autre disque depuis, et même s'il s'agit d'une autre machine (voir
-  « déplacer une sauvegarde » ci-dessous). Seuls les chemins
-  personnalisés hors dossiers utilisateur, dont le disque n'existe plus,
-  atterrissent dans un dossier visible sur le Bureau.
+- **Emplacement logique sur le NAS** : un fichier est rangé sous le nom de
+  son dossier (`Téléchargements/facture.pdf`), jamais sous son emplacement
+  physique. Si l'utilisateur déplace Téléchargements sur un autre disque,
+  la sauvegarde reste au même endroit sur le NAS au lieu de repartir de
+  zéro sous `E/Téléchargements`. Seuls les chemins personnalisés hors
+  dossiers utilisateur sont rangés sous `_outside/`.
+- **Le panneau vous dit où aller** : la fiche d'un appareil affiche le
+  chemin exact de son dossier sur le NAS (avec un bouton « Copier le
+  chemin »), la liste des anciennes versions conservées avec leur taille,
+  et un bouton pour en supprimer une.
 - **Icône dans la barre des tâches (Windows)** : affiche la date de la
   dernière sauvegarde et permet de sauvegarder maintenant ou de
   reprogrammer la prochaine sauvegarde - sans jamais bloquer un
@@ -107,7 +136,7 @@ règles de pare-feu/inter-VLAN différentes :
 | Port | Contenu | Qui doit pouvoir y accéder |
 |---|---|---|
 | **80** (`BACKUP_SERVER_PANEL_PORT`) | Panneau admin : connexion, tableau de bord, gestion des appareils/paramètres | Uniquement votre réseau/VLAN d'administration |
-| **8420** (`BACKUP_SERVER_AGENT_PORT`) | Trafic agents : enrôlement, upload/download des sauvegardes, WebSocket de contrôle, page `/download` | Tous les VLAN où se trouvent les postes à sauvegarder |
+| **8420** (`BACKUP_SERVER_AGENT_PORT`) | Trafic agents : enrôlement, envoi des fichiers, WebSocket de contrôle, page `/download` | Tous les VLAN où se trouvent les postes à sauvegarder |
 
 Un agent ne parle jamais au port 80 : la clé d'enrôlement générée dans le
 panneau embarque déjà l'adresse du port 8420. Les deux ports sont

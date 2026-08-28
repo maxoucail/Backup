@@ -3,13 +3,13 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
+	"time"
 
+	"backup-server/internal/filestore"
 	"backup-server/internal/models"
 	"backup-server/internal/scheduler"
-	"backup-server/internal/storage"
 )
 
 // effectivePolicy resolves per-device overrides against the global
@@ -48,7 +48,6 @@ func (a *API) handleAgentGetConfig(w http.ResponseWriter, r *http.Request, devic
 		"interval_minutes": interval,
 		"retention_count":  retention,
 		"backup_paths":     paths,
-		"chunk_size_bytes": settings.ChunkSizeBytes,
 	})
 }
 
@@ -83,136 +82,101 @@ func (a *API) handleAgentCreateSnapshot(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusCreated, map[string]any{"queued": false, "snapshot_id": snap.ID})
 }
 
-type checkChunksRequest struct {
-	Hashes []string `json:"hashes"`
+type planRequest struct {
+	Files []filestore.FileInfo `json:"files"`
 }
 
-// handleAgentCheckChunks lets the agent skip re-uploading any chunk the
-// store already has - whether from this device's own previous backup or,
-// thanks to content-addressing, from any other device that happened to
-// have identical file content. This is the core of the incremental
-// behaviour: only genuinely new or changed data crosses the network.
-func (a *API) handleAgentCheckChunks(w http.ResponseWriter, r *http.Request, deviceID string) {
-	var req checkChunksRequest
-	if err := decodeJSONLenient(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "requête invalide")
+// handleAgentPlan is the heart of the incremental backup.
+//
+// The agent announces everything it currently holds; the server preserves
+// the machine's current folder as a dated version, brings that folder in
+// line with what the machine no longer has, and replies with just the
+// files it doesn't already have an identical copy of. Only those cross the
+// network - an unchanged 4 GB photo library is never re-sent, and never
+// re-stored.
+func (a *API) handleAgentPlan(w http.ResponseWriter, r *http.Request, deviceID, snapshotID string) {
+	snap, err := models.GetSnapshot(a.DB, snapshotID)
+	if err != nil || snap.DeviceID != deviceID {
+		writeError(w, http.StatusNotFound, "sauvegarde introuvable")
 		return
 	}
-	store := a.Store.Get()
-	missing := make([]string, 0, len(req.Hashes))
-	for _, h := range req.Hashes {
-		if !isValidHash(h) {
-			writeError(w, http.StatusBadRequest, "hash invalide: "+h)
-			return
-		}
-		if store.HasChunk(h) {
-			// This backup is about to depend on a chunk it won't upload.
-			// Mark it in use so retention rotation of whichever snapshot
-			// originally stored it can't collect it out from under us
-			// before this backup's manifest lands.
-			store.Touch(h)
-			continue
-		}
-		missing = append(missing, h)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"missing": missing})
-}
-
-const maxChunkBodyBytes = 64 * 1024 * 1024 // hard ceiling, well above the configured chunk size
-
-func (a *API) handleAgentUploadChunk(w http.ResponseWriter, r *http.Request, deviceID string, hash string) {
-	if !isValidHash(hash) {
-		writeError(w, http.StatusBadRequest, "hash invalide")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxChunkBodyBytes)
-	store := a.Store.Get()
-	n, err := store.WriteChunk(hash, r.Body)
+	device, err := models.GetDevice(a.DB, deviceID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "échec de l'écriture du chunk: "+err.Error())
+		writeError(w, http.StatusNotFound, "appareil introuvable")
+		return
+	}
+
+	var req planRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 512*1024*1024)
+	if err := decodeJSONLenient(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "liste de fichiers invalide")
+		return
+	}
+	if len(req.Files) == 0 {
+		writeError(w, http.StatusBadRequest, "aucun fichier à sauvegarder")
+		return
+	}
+
+	store := a.Store.Get()
+	deviceDir := store.DeviceDir(device.ID, device.Name)
+
+	// Preserve the current state before touching it, so a complete
+	// previous version always exists even if this backup is interrupted
+	// halfway through.
+	versionDir, err := store.SnapshotCurrent(deviceDir, time.Now())
+	if err != nil {
+		log.Printf("plan: création de la version précédente pour %s: %v", device.Name, err)
+		writeError(w, http.StatusInternalServerError, "impossible de préparer la nouvelle version")
+		return
+	}
+	if versionDir != "" {
+		log.Printf("sauvegarde %s: version précédente conservée dans %s", device.Name, versionDir)
+	}
+
+	if removed := store.PruneRemoved(deviceDir, req.Files); removed > 0 {
+		log.Printf("sauvegarde %s: %d fichier(s) retiré(s) du miroir (absents de la machine)", device.Name, removed)
+	}
+
+	needed := store.NeededFiles(deviceDir, req.Files)
+
+	var logicalBytes int64
+	for _, f := range req.Files {
+		logicalBytes += f.Size
+	}
+	_ = models.UpdateSnapshotProgress(a.DB, snapshotID, len(req.Files), logicalBytes, 0, 0)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"needed":      needed,
+		"destination": deviceDir,
+	})
+}
+
+const maxFileBodyBytes = 16 * 1024 * 1024 * 1024 // 16 GiB ceiling per file
+
+// handleAgentUploadFile stores one file, in clear, at its own path under
+// the machine's folder.
+func (a *API) handleAgentUploadFile(w http.ResponseWriter, r *http.Request, deviceID string) {
+	device, err := models.GetDevice(a.DB, deviceID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "appareil introuvable")
+		return
+	}
+	relPath := r.URL.Query().Get("path")
+	if relPath == "" {
+		writeError(w, http.StatusBadRequest, "chemin manquant")
+		return
+	}
+	var modTime int64
+	fmt.Sscanf(r.URL.Query().Get("mtime"), "%d", &modTime)
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxFileBodyBytes)
+	store := a.Store.Get()
+	n, err := store.WriteFile(store.DeviceDir(device.ID, device.Name), relPath, r.Body, modTime)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "échec de l'écriture: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"bytes_written": n})
-}
-
-func (a *API) handleAgentDownloadChunk(w http.ResponseWriter, r *http.Request, deviceID string, hash string) {
-	if !isValidHash(hash) {
-		writeError(w, http.StatusBadRequest, "hash invalide")
-		return
-	}
-	store := a.Store.Get()
-	f, err := store.ChunkReader(hash)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "chunk introuvable")
-		return
-	}
-	defer f.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	_, _ = io.Copy(w, f)
-}
-
-func (a *API) handleAgentSubmitManifest(w http.ResponseWriter, r *http.Request, deviceID, snapshotID string) {
-	snap, err := models.GetSnapshot(a.DB, snapshotID)
-	if err != nil || snap.DeviceID != deviceID {
-		writeError(w, http.StatusNotFound, "sauvegarde introuvable")
-		return
-	}
-
-	var manifest storage.Manifest
-	r.Body = http.MaxBytesReader(w, r.Body, 256*1024*1024)
-	if err := decodeJSONLenient(r, &manifest); err != nil {
-		writeError(w, http.StatusBadRequest, "manifeste invalide")
-		return
-	}
-	manifest.DeviceID = deviceID
-	manifest.SnapshotID = snapshotID
-
-	store := a.Store.Get()
-	var logicalBytes int64
-	for _, f := range manifest.Files {
-		logicalBytes += f.Size
-		for _, c := range f.Chunks {
-			if !isValidHash(c) {
-				writeError(w, http.StatusBadRequest, "hash de chunk invalide dans le manifeste")
-				return
-			}
-			if !store.HasChunk(c) {
-				writeError(w, http.StatusConflict, "chunk manquant sur le serveur: "+c)
-				return
-			}
-		}
-	}
-
-	path, err := store.WriteManifest(&manifest)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "erreur serveur")
-		return
-	}
-	if err := models.UpdateSnapshotProgress(a.DB, snapshotID, len(manifest.Files), logicalBytes, snap.UploadedBytes, snap.ProgressPercent); err != nil {
-		writeError(w, http.StatusInternalServerError, "erreur serveur")
-		return
-	}
-	_, _ = a.DB.Exec(`UPDATE snapshots SET manifest_path = ? WHERE id = ?`, path, snapshotID)
-
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
-}
-
-func (a *API) handleAgentGetManifest(w http.ResponseWriter, r *http.Request, deviceID, snapshotID string) {
-	snap, err := models.GetSnapshot(a.DB, snapshotID)
-	if err != nil || snap.DeviceID != deviceID {
-		writeError(w, http.StatusNotFound, "sauvegarde introuvable")
-		return
-	}
-	if snap.ManifestPath == "" {
-		writeError(w, http.StatusNotFound, "manifeste introuvable")
-		return
-	}
-	manifest, err := storage.ReadManifest(snap.ManifestPath)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "manifeste introuvable")
-		return
-	}
-	writeJSON(w, http.StatusOK, manifest)
 }
 
 type finishSnapshotRequest struct {
@@ -238,7 +202,7 @@ func (a *API) handleAgentFinishSnapshot(w http.ResponseWriter, r *http.Request, 
 	}
 
 	_, _ = a.DB.Exec(`UPDATE snapshots SET uploaded_bytes = ? WHERE id = ?`, req.UploadedBytes, snapshotID)
-	if err := models.FinishSnapshot(a.DB, snapshotID, req.Status, req.ErrorMessage, snap.ManifestPath); err != nil {
+	if err := models.FinishSnapshot(a.DB, snapshotID, req.Status, req.ErrorMessage); err != nil {
 		a.Queue.Release(deviceID) // slot must not outlive the backup, even on a failed write
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
@@ -257,12 +221,12 @@ func (a *API) handleAgentFinishSnapshot(w http.ResponseWriter, r *http.Request, 
 	_ = models.AddEvent(a.DB, &deviceID, level, msg)
 
 	if req.Status == models.SnapshotStatusSuccess {
-		// Runs after the response is sent: retention rotation walks the
-		// whole chunk store during GC, which could otherwise make the
-		// agent's finish request wait a long time on a large repository.
+		// Retention runs only now, once the new backup is complete: an
+		// old version is never dropped while the current one is still
+		// being written.
 		go func(deviceID string) {
 			if _, err := scheduler.RotateRetention(a.DB, a.Store, deviceID); err != nil {
-				log.Printf("api: retention rotation for device %s failed: %v", deviceID, err)
+				log.Printf("api: rotation de rétention pour %s: %v", deviceID, err)
 			}
 		}(deviceID)
 	}

@@ -1,6 +1,6 @@
-// Package client talks to the backup server: enrollment, the chunk/manifest
-// data plane over HTTP, and the command/progress control plane over
-// WebSocket.
+// Package client talks to the backup server: enrollment, the file data
+// plane over HTTP (announce what this machine holds, upload what the
+// server asks for), and the command/progress control plane over WebSocket.
 package client
 
 import (
@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,7 +53,9 @@ func (c *Client) authRequest(ctx context.Context, method, path string, body io.R
 }
 
 func doJSON(client *http.Client, req *http.Request, out any) error {
-	req.Header.Set("Content-Type", "application/json")
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -97,7 +101,6 @@ type PolicyResponse struct {
 	IntervalMinutes int      `json:"interval_minutes"`
 	RetentionCount  int      `json:"retention_count"`
 	BackupPaths     []string `json:"backup_paths"`
-	ChunkSizeBytes  int64    `json:"chunk_size_bytes"`
 }
 
 func (c *Client) GetConfig(ctx context.Context) (*PolicyResponse, error) {
@@ -151,42 +154,50 @@ func (c *Client) CreateSnapshot(ctx context.Context, kind string) (string, error
 	return out.SnapshotID, nil
 }
 
-func (c *Client) CheckChunks(ctx context.Context, snapshotID string, hashes []string) ([]string, error) {
-	body, _ := json.Marshal(map[string][]string{"hashes": hashes})
-	req, err := c.authRequest(ctx, http.MethodPost, "/api/agent/snapshots/"+snapshotID+"/check-chunks", bytes.NewReader(body))
+// Plan announces everything this machine currently holds and gets back
+// just the subset the server doesn't already have an identical copy of.
+//
+// This is what makes the backup incremental: the server compares the list
+// against the files already sitting in this machine's folder on the NAS,
+// so an unchanged 4 GB photo library is never re-sent. It also gives the
+// server the moment to preserve the current state as a dated version
+// before anything is overwritten.
+func (c *Client) Plan(ctx context.Context, snapshotID string, files []protocol.FileInfo) (needed []string, destination string, err error) {
+	body, err := json.Marshal(map[string]any{"files": files})
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	req, err := c.authRequest(ctx, http.MethodPost, "/api/agent/snapshots/"+snapshotID+"/plan", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
 	}
 	var out struct {
-		Missing []string `json:"missing"`
+		Needed      []string `json:"needed"`
+		Destination string   `json:"destination"`
 	}
-	client := &http.Client{Timeout: 60 * time.Second}
+	// A first backup of a large disk can announce hundreds of thousands of
+	// files, and the server preserves the previous version before replying,
+	// so this one call is legitimately slow.
+	client := &http.Client{Timeout: 30 * time.Minute}
 	if err := doJSON(client, req, &out); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return out.Missing, nil
+	return out.Needed, out.Destination, nil
 }
 
-func (c *Client) UploadChunk(ctx context.Context, hash string, r io.Reader, size int64) error {
-	req, err := c.authRequest(ctx, http.MethodPut, "/api/agent/chunks/"+hash, r)
+// UploadFile sends one file's raw bytes; the server writes it, in clear, at
+// the same relative location under the machine's folder on the NAS.
+func (c *Client) UploadFile(ctx context.Context, relPath string, modTime, size int64, r io.Reader) error {
+	q := url.Values{}
+	q.Set("path", relPath)
+	q.Set("mtime", strconv.FormatInt(modTime, 10))
+	req, err := c.authRequest(ctx, http.MethodPut, "/api/agent/files?"+q.Encode(), r)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = size
-	client := &http.Client{Timeout: 5 * time.Minute}
-	return doJSON(client, req, nil)
-}
-
-func (c *Client) SubmitManifest(ctx context.Context, snapshotID string, manifest *protocol.Manifest) error {
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		return err
-	}
-	req, err := c.authRequest(ctx, http.MethodPost, "/api/agent/snapshots/"+snapshotID+"/manifest", bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	client := &http.Client{Timeout: 2 * time.Minute}
+	client := &http.Client{Timeout: 30 * time.Minute}
 	return doJSON(client, req, nil)
 }
 
@@ -198,39 +209,4 @@ func (c *Client) FinishSnapshot(ctx context.Context, snapshotID, status, errMsg 
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	return doJSON(client, req, nil)
-}
-
-func (c *Client) GetManifest(ctx context.Context, snapshotID string) (*protocol.Manifest, error) {
-	req, err := c.authRequest(ctx, http.MethodGet, "/api/agent/snapshots/"+snapshotID+"/manifest", nil)
-	if err != nil {
-		return nil, err
-	}
-	var out protocol.Manifest
-	client := &http.Client{Timeout: 30 * time.Second}
-	if err := doJSON(client, req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *Client) DownloadChunk(ctx context.Context, hash string) (io.ReadCloser, error) {
-	req, err := c.authRequest(ctx, http.MethodGet, "/api/agent/chunks/"+hash, nil)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		resp.Body.Close()
-		return nil, ErrUnauthorized
-	}
-	if resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		return nil, fmt.Errorf("téléchargement du chunk %s: %d %s", hash, resp.StatusCode, string(data))
-	}
-	return resp.Body, nil
 }

@@ -143,7 +143,7 @@ func tokenForSession(id uint32) (syscall.Handle, error) {
 // folder path the agent resolves - fail on entirely ordinary machines:
 // a user connected over RDP (their session is real and active but is never
 // the console), a machine sitting at the lock or login screen when a
-// restore is triggered from the panel, or a session in the middle of
+// backup is triggered from the panel, or a session in the middle of
 // connecting. Enumerating the session table and accepting any session that
 // actually yields a user token covers all of those.
 func candidateSessionIDs() []uint32 {

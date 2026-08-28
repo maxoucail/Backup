@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS settings (
 	default_retention_count INTEGER NOT NULL DEFAULT 7,
 	event_retention_days INTEGER NOT NULL DEFAULT 30,
 	event_retention_max_rows INTEGER NOT NULL DEFAULT 20000,
+	-- chunk_size_bytes: unused since backups became plain files; kept so
+	-- an existing database still satisfies its NOT NULL constraint.
 	chunk_size_bytes INTEGER NOT NULL DEFAULT 16777216,
 	max_concurrent_backups INTEGER NOT NULL DEFAULT 1,
 	static_enrollment_token TEXT NOT NULL DEFAULT ''

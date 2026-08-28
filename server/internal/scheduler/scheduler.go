@@ -1,8 +1,8 @@
 // Package scheduler runs the server's background maintenance: rotating
-// snapshot retention (deleting the oldest backups past the configured
-// limit and reclaiming their now-unreferenced chunks), purging old event
-// log rows so the database stays small, marking devices offline when their
-// agent stops checking in, and cleaning up expired enrollment keys.
+// retention (deleting a machine's oldest previous versions past the
+// configured limit), purging old event log rows so the database stays
+// small, marking devices offline when their agent stops checking in, and
+// cleaning up expired enrollment keys.
 package scheduler
 
 import (
@@ -11,18 +11,23 @@ import (
 	"log"
 	"time"
 
+	"backup-server/internal/filestore"
 	"backup-server/internal/models"
 	"backup-server/internal/queue"
-	"backup-server/internal/storage"
 )
 
 const staleDeviceAfter = 10 * time.Minute
 
-// RotateRetention enforces the keep-count for one device: oldest
-// successful snapshots beyond the limit are deleted (DB row + manifest),
-// then the chunk store is garbage collected. Safe to call after every
-// finished snapshot and periodically as a safety net.
-func RotateRetention(db *sql.DB, storeHolder *storage.Holder, deviceID string) (deleted int, err error) {
+// RotateRetention enforces the keep-count for one device by deleting its
+// oldest *previous versions* on the NAS.
+//
+// The machine's current backup is the top-level folder and is never
+// touched here; retention only ever trims _anciennes_versions. Because it
+// runs after a new backup completes (see handleAgentFinishSnapshot),
+// there is never a moment where the oldest version has been dropped while
+// the newest is still being written - a retention of 2 always means at
+// least two usable states on disk.
+func RotateRetention(db *sql.DB, storeHolder *filestore.Holder, deviceID string) (deleted int, err error) {
 	store := storeHolder.Get()
 	device, err := models.GetDevice(db, deviceID)
 	if err != nil {
@@ -37,47 +42,25 @@ func RotateRetention(db *sql.DB, storeHolder *storage.Holder, deviceID string) (
 	if device.RetentionCount != nil {
 		keep = *device.RetentionCount
 	}
-	if keep <= 0 {
-		keep = 1
+	if keep < minRetention {
+		keep = minRetention
 	}
-
-	snaps, err := models.ListSuccessfulSnapshotsForDevice(db, deviceID)
-	if err != nil {
-		return 0, err
-	}
-	if len(snaps) <= keep {
-		return 0, nil
-	}
-
-	toDelete := snaps[:len(snaps)-keep]
-	for _, s := range toDelete {
-		if err := storage.DeleteManifest(s.ManifestPath); err != nil {
-			log.Printf("retention: could not remove manifest for snapshot %s: %v", s.ID, err)
-		}
-		if err := models.DeleteSnapshot(db, s.ID); err != nil {
-			log.Printf("retention: could not delete snapshot row %s: %v", s.ID, err)
-			continue
-		}
-		deleted++
-	}
-
+	// keep counts total states; the live mirror is one of them, so the
+	// versions directory holds keep-1.
+	deleted = store.Rotate(store.DeviceDir(device.ID, device.Name), keep-1)
 	if deleted > 0 {
-		remaining, err := models.AllManifestPaths(db)
-		if err != nil {
-			return deleted, err
-		}
-		freed, removed, err := store.GarbageCollect(remaining, storage.GraceCutoff())
-		if err != nil {
-			log.Printf("retention: garbage collection error: %v", err)
-		} else {
-			log.Printf("retention: device %s rotated %d old snapshot(s), reclaimed %d chunk(s) (%d bytes)",
-				deviceID, deleted, removed, freed)
-		}
-		msg := "Rotation de rétention : anciennes sauvegardes supprimées, espace disque récupéré."
+		log.Printf("rétention: appareil %s, %d ancienne(s) version(s) supprimée(s)", device.Name, deleted)
+		msg := "Rotation de rétention : anciennes versions supprimées du stockage."
 		_ = models.AddEvent(db, &deviceID, models.EventLevelInfo, msg)
 	}
 	return deleted, nil
 }
+
+// minRetention is the floor for how many states are kept. Two is the
+// smallest number that is actually safe: with one, the only copy is the
+// mirror being overwritten, so a file corrupted on the PC propagates to
+// the NAS with nothing left to fall back on.
+const minRetention = 2
 
 // staleBackupAfter is how long a snapshot may sit in "running" before it's
 // written off. A backup slot is normally released when the agent finishes
@@ -128,7 +111,7 @@ func releaseUnconfirmedBackups(db *sql.DB, q *queue.Manager) {
 }
 
 // Run blocks, performing periodic maintenance until ctx is cancelled.
-func Run(ctx context.Context, db *sql.DB, store *storage.Holder, q *queue.Manager) {
+func Run(ctx context.Context, db *sql.DB, store *filestore.Holder, q *queue.Manager) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 

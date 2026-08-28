@@ -31,20 +31,6 @@ type Config struct {
 	// PendingCatchUpAt has already fired, so a restart doesn't repeat them.
 	CatchUpNotifiedT15 bool `json:"catch_up_notified_t15,omitempty"`
 	CatchUpNotifiedT5  bool `json:"catch_up_notified_t5,omitempty"`
-
-	// LastKnownHome and LastKnownFolders remember where this machine's
-	// user folders actually were, recorded whenever a backup resolves them
-	// successfully. They exist for restore: resolving the logged-on user's
-	// profile from a service depends on there being a usable session right
-	// then (see internal/winsession), and a restore triggered from the
-	// panel can perfectly well land while the machine sits at the lock
-	// screen with no such session. Rather than give up - or, far worse,
-	// silently write into the service account's own profile where nobody
-	// will ever find the files - restore falls back to these last known
-	// good paths. They're only ever written from a successful resolution,
-	// so they always describe a real user's real folders.
-	LastKnownHome    string            `json:"last_known_home,omitempty"`
-	LastKnownFolders map[string]string `json:"last_known_folders,omitempty"`
 }
 
 func (c *Config) Enrolled() bool {
@@ -112,9 +98,9 @@ func Save(c *Config) error {
 	return os.Rename(tmp, p)
 }
 
-// Clear wipes the local device identity (config + cached manifest) so the
-// agent starts fresh through the setup wizard on next use - used when the
-// server reports this device is no longer recognized (decommissioned).
+// Clear wipes the local device identity so the agent starts fresh through
+// the setup wizard on next use - used when the server reports this device
+// is no longer recognized (decommissioned).
 func Clear() error {
 	p, err := path()
 	if err != nil {
@@ -123,20 +109,10 @@ func Clear() error {
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if mp, err := ManifestCachePath(); err == nil {
-		_ = os.Remove(mp)
+	// Left over from the pre-plain-files protocol; removed here so a
+	// decommissioned machine doesn't keep a stale index around forever.
+	if dir, err := Dir(); err == nil {
+		_ = os.Remove(filepath.Join(dir, "last_manifest.json"))
 	}
 	return nil
-}
-
-// ManifestCachePath is where the agent keeps a local copy of the last
-// manifest it successfully uploaded, so routine backups can skip
-// re-hashing unchanged files (matched by size+mtime) without round-tripping
-// to the server first.
-func ManifestCachePath() (string, error) {
-	dir, err := Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "last_manifest.json"), nil
 }

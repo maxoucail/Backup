@@ -37,13 +37,28 @@
 				<form id="policy-form">
 					<label>Intervalle (minutes)</label>
 					<input class="input" id="policy-interval" type="number" min="5" placeholder="valeur par défaut du serveur">
-					<label>Nombre de sauvegardes à conserver</label>
-					<input class="input" id="policy-retention" type="number" min="1" placeholder="valeur par défaut du serveur">
+					<label>Nombre d'états à conserver (minimum 2 : la sauvegarde à jour + au moins une version précédente)</label>
+					<input class="input" id="policy-retention" type="number" min="2" placeholder="valeur par défaut du serveur">
 					<label>Dossiers sauvegardés (un par ligne, vide = dossiers par défaut de l'utilisateur)</label>
 					<textarea class="input" id="policy-paths" rows="4" placeholder="ex: Desktop, Documents, Pictures, Downloads"></textarea>
 					<button class="btn" type="submit" style="margin-top:14px;">Enregistrer la politique</button>
 				</form>
 			</div>
+		</div>
+
+		<div class="card" style="margin-bottom:16px;">
+			<div class="section-title">Fichiers sur le NAS</div>
+			<p class="muted" style="margin-top:0;">Les fichiers sont stockés en clair, dans l'arborescence de la machine. Pour restaurer : ouvrez ce dossier, copiez ce dont vous avez besoin, collez-le sur le poste.</p>
+			<div class="row" style="align-items:center; gap:8px; margin-bottom:14px;">
+				<code id="storage-dir" class="storage-path">…</code>
+				<button class="btn secondary small" id="copy-path-btn">Copier le chemin</button>
+			</div>
+			<div class="section-title" style="font-size:13px;">Versions précédentes conservées</div>
+			<table>
+				<thead><tr><th>Version</th><th>Emplacement</th><th>Taille</th><th></th></tr></thead>
+				<tbody id="versions-body"></tbody>
+			</table>
+			<div id="versions-empty" class="empty-state" style="display:none;">Aucune version précédente pour l'instant : la première sauvegarde est la seule copie existante.</div>
 		</div>
 
 		<div class="card">
@@ -56,34 +71,10 @@
 	</div>
 </div>
 
-<div class="modal-backdrop" id="restore-modal" style="display:none;">
-	<div class="modal">
-		<h3>Confirmer la restauration</h3>
-		<p class="muted">Cette action envoie une commande de restauration à l'appareil distant. Une fenêtre de progression s'affichera sur son écran.</p>
-		<div class="row" style="justify-content:flex-end; margin-top:18px;">
-			<button class="btn secondary" id="restore-cancel">Annuler</button>
-			<button class="btn" id="restore-confirm">Restaurer</button>
-		</div>
-	</div>
-</div>
-
-<div class="modal-backdrop" id="move-modal" style="display:none;">
-	<div class="modal">
-		<h3>Déplacer cette sauvegarde vers un autre appareil</h3>
-		<p class="muted">Utile quand ce poste a été remplacé : la sauvegarde devient restaurable depuis l'appareil choisi (aucune donnée n'est retransférée, seule la propriété change). Elle disparaît de la liste de cet appareil-ci et compte désormais dans le quota de rétention de l'appareil cible.</p>
-		<label>Appareil cible</label>
-		<select class="input" id="move-target-select"></select>
-		<div class="row" style="justify-content:flex-end; margin-top:18px;">
-			<button class="btn secondary" id="move-cancel">Annuler</button>
-			<button class="btn" id="move-confirm">Déplacer</button>
-		</div>
-	</div>
-</div>
-
 <div class="modal-backdrop" id="decommission-modal" style="display:none;">
 	<div class="modal">
 		<h3>Décommissionner cet appareil</h3>
-		<p class="muted">Cette action est irréversible : l'agent reçoit l'ordre de se désinstaller (arrêt du service, suppression de ses identifiants locaux) et toutes ses sauvegardes sont supprimées du serveur. Vous pourrez réenrôler cette machine plus tard avec une nouvelle clé si besoin.</p>
+		<p class="muted">Cette action est irréversible : l'agent reçoit l'ordre de se désinstaller (arrêt du service, suppression de ses identifiants locaux) et son dossier complet est supprimé du NAS, versions précédentes comprises. Vous pourrez réenrôler cette machine plus tard avec une nouvelle clé si besoin.</p>
 		<label>Tapez <strong id="decommission-name-hint"></strong> pour confirmer</label>
 		<input class="input" id="decommission-confirm-input" autocomplete="off">
 		<div class="row" style="justify-content:flex-end; margin-top:18px;">
@@ -99,18 +90,11 @@ document.getElementById("sidebar-slot").outerHTML = renderSidebar("devices");
 wireLogout();
 
 const deviceId = window.location.pathname.split("/").pop();
-let pendingRestoreSnapshotId = null;
 
 function snapshotRow(s) {
 	const size = fmtBytes(s.logical_bytes);
-	const restoreBtn = s.status === "success"
-		? `<button class="btn secondary small" onclick="openRestoreModal('${s.id}')">Restaurer</button>`
-		: "";
 	const deleteBtn = s.status !== "running"
-		? `<button class="btn danger small" onclick="deleteSnapshot('${s.id}')">Supprimer</button>`
-		: "";
-	const moveBtn = s.status !== "running"
-		? `<button class="btn secondary small" onclick="openMoveModal('${s.id}')">Déplacer…</button>`
+		? `<button class="btn danger small" onclick="deleteSnapshot('${s.id}')" title="Retire cette ligne de l'historique. Les fichiers sur le NAS ne sont pas touchés.">Retirer de l'historique</button>`
 		: "";
 	const progress = s.status === "running"
 		? `<div class="progress-bar"><div style="width:${s.progress_percent}%"></div></div>`
@@ -122,66 +106,13 @@ function snapshotRow(s) {
 		<td>${s.file_count}</td>
 		<td>${size}</td>
 		<td style="min-width:100px;">${progress}</td>
-		<td>${restoreBtn} ${moveBtn} ${deleteBtn}</td>
+		<td>${deleteBtn}</td>
 	</tr>`;
 }
 
 function eventRow(e) {
 	return `<tr><td class="muted">${fmtDate(e.ts)}</td><td><span class="badge ${e.level === 'error' ? 'failed' : e.level === 'warning' ? 'cancelled' : 'success'}">${e.level}</span></td><td>${e.message}</td></tr>`;
 }
-
-function openRestoreModal(snapshotId) {
-	pendingRestoreSnapshotId = snapshotId;
-	document.getElementById("restore-modal").style.display = "flex";
-}
-
-let pendingMoveSnapshotId = null;
-
-async function openMoveModal(snapshotId) {
-	pendingMoveSnapshotId = snapshotId;
-	const select = document.getElementById("move-target-select");
-	select.innerHTML = `<option value="">Chargement…</option>`;
-	document.getElementById("move-modal").style.display = "flex";
-	try {
-		const devices = (await api("GET", "/api/devices")).filter(d => d.id !== deviceId);
-		if (devices.length === 0) {
-			select.innerHTML = `<option value="">Aucun autre appareil enrôlé</option>`;
-			return;
-		}
-		select.innerHTML = devices.map(d => `<option value="${d.id}">${d.name}</option>`).join("");
-	} catch (err) {
-		select.innerHTML = `<option value="">Erreur de chargement</option>`;
-		toast(err.message, "error");
-	}
-}
-document.getElementById("move-cancel").addEventListener("click", () => {
-	document.getElementById("move-modal").style.display = "none";
-});
-document.getElementById("move-confirm").addEventListener("click", async () => {
-	const targetDeviceId = document.getElementById("move-target-select").value;
-	if (!targetDeviceId) return;
-	try {
-		await api("POST", `/api/devices/${deviceId}/snapshots/${pendingMoveSnapshotId}/reassign`, { target_device_id: targetDeviceId });
-		document.getElementById("move-modal").style.display = "none";
-		toast("Sauvegarde déplacée.", "success");
-		load();
-	} catch (err) {
-		toast(err.message, "error");
-	}
-});
-document.getElementById("restore-cancel").addEventListener("click", () => {
-	document.getElementById("restore-modal").style.display = "none";
-});
-document.getElementById("restore-confirm").addEventListener("click", async () => {
-	document.getElementById("restore-modal").style.display = "none";
-	try {
-		await api("POST", `/api/devices/${deviceId}/restore`, { snapshot_id: pendingRestoreSnapshotId });
-		toast("Restauration déclenchée.", "success");
-		load();
-	} catch (err) {
-		toast(err.message, "error");
-	}
-});
 
 document.getElementById("backup-now-btn").addEventListener("click", async () => {
 	try {
@@ -251,15 +182,59 @@ document.getElementById("policy-form").addEventListener("submit", async (e) => {
 });
 
 async function deleteSnapshot(snapshotId) {
-	if (!confirm("Supprimer définitivement cette sauvegarde ? Cette action est irréversible.")) return;
+	if (!confirm("Retirer cette ligne de l'historique ? Les fichiers sauvegardés sur le NAS ne sont pas supprimés.")) return;
 	try {
 		await api("DELETE", `/api/devices/${deviceId}/snapshots/${snapshotId}`);
-		toast("Sauvegarde supprimée.", "success");
+		toast("Ligne retirée de l'historique.", "success");
 		load();
 	} catch (err) {
 		toast(err.message, "error");
 	}
 }
+
+function versionRow(v) {
+	return `<tr>
+		<td>${v.name}</td>
+		<td><code class="storage-path">${v.path}</code></td>
+		<td>${fmtBytes(v.size_bytes)}</td>
+		<td><button class="btn danger small" onclick="deleteVersion('${v.name}')">Supprimer</button></td>
+	</tr>`;
+}
+
+async function deleteVersion(name) {
+	if (!confirm(`Supprimer définitivement l'ancienne version « ${name} » ? La sauvegarde à jour de la machine n'est pas touchée.`)) return;
+	try {
+		await api("DELETE", `/api/devices/${deviceId}/versions/${encodeURIComponent(name)}`);
+		toast("Ancienne version supprimée.", "success");
+		loadVersions();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+}
+
+async function loadVersions() {
+	try {
+		const data = await api("GET", `/api/devices/${deviceId}/versions`);
+		document.getElementById("storage-dir").textContent = data.storage_dir || "—";
+		const versions = data.versions || [];
+		document.getElementById("versions-body").innerHTML = versions.map(versionRow).join("");
+		document.getElementById("versions-empty").style.display = versions.length ? "none" : "block";
+	} catch (err) {
+		document.getElementById("storage-dir").textContent = "indisponible";
+	}
+}
+
+document.getElementById("copy-path-btn").addEventListener("click", async () => {
+	const path = document.getElementById("storage-dir").textContent;
+	try {
+		await navigator.clipboard.writeText(path);
+		toast("Chemin copié.", "success");
+	} catch (err) {
+		// Clipboard access is blocked on plain HTTP in some browsers; the
+		// path is on screen either way, so say so rather than fail silently.
+		toast("Copie impossible depuis ce navigateur : sélectionnez le chemin à la main.", "error");
+	}
+});
 
 async function load() {
 	try {
@@ -288,7 +263,9 @@ async function load() {
 	}
 }
 load();
+loadVersions();
 setInterval(load, 3000);
+setInterval(loadVersions, 15000);
 </script>
 </body>
 </html>

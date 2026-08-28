@@ -3,28 +3,31 @@
 ## Vue d'ensemble
 
 ```
-        HTTPS/WS                                    fichiers
- ┌──────────────┐   enrôlement, chunks,      ┌────────────────────┐
- │ Agent Windows│──  manifestes, commandes ──│                    │
- │  (Go, seul   │   ────────────────────────▶│  Serveur (Go)      │
- │   binaire)   │◀── progression, config ─────│  - panneau web     │
- └──────────────┘                             │  - API REST        │
- ┌──────────────┐                             │  - hub WebSocket   │
- │ Agent macOS  │◀───────────────────────────▶│  - SQLite          │
- │  (Go)        │                             │  - stockage chunké │
- └──────────────┘                             └────────────────────┘
+        HTTP/WS                                     fichiers en clair
+ ┌──────────────┐   enrôlement, plan,        ┌────────────────────┐      ┌─────────┐
+ │ Agent Windows│──  envoi de fichiers ──────│                    │      │  NAS    │
+ │  (Go, seul   │   ────────────────────────▶│  Serveur (Go)      │─────▶│ un      │
+ │   binaire)   │◀── progression, config ────│  - panneau web     │      │ dossier │
+ └──────────────┘                            │  - API REST        │      │ par PC  │
+ ┌──────────────┐                            │  - hub WebSocket   │      └─────────┘
+ │ Agent macOS  │◀──────────────────────────▶│  - SQLite          │
+ │  (Go)        │                            │  - stockage fichier│
+ └──────────────┘                            └────────────────────┘
 ```
 
 Deux plans de communication séparés entre agent et serveur :
 
 - **Plan de contrôle** (`/ws/agent`, WebSocket) : présence de l'appareil,
-  commandes distantes (`backup_now`, `restore`, `cancel`), poussée de
+  commandes distantes (`backup_now`, `cancel`, `uninstall`), poussée de
   politique (`config`), remontée de progression et de logs. Léger,
   persistant, faible latence.
-- **Plan de données** (`/api/agent/...`, HTTP) : upload/download de blocs,
-  soumission de manifeste, cycle de vie des sauvegardes. Un flux HTTP
-  classique par opération, ce qui permet la parallélisation native (upload
-  de plusieurs blocs à la fois) et des reprises simples.
+- **Plan de données** (`/api/agent/...`, HTTP) : établissement du plan
+  incrémental, envoi des fichiers, cycle de vie des sauvegardes. Un flux
+  HTTP classique par fichier, ce qui permet la parallélisation native
+  (plusieurs fichiers à la fois) et des reprises simples.
+
+Il n'y a **pas de plan de restauration** : les fichiers sont sur le NAS en
+clair, on les récupère avec un explorateur de fichiers.
 
 Ces deux plans tournent en plus sur des **ports séparés** au niveau
 réseau (pas seulement des routes) : le panneau admin sur un port
@@ -42,23 +45,71 @@ la réactivité des commandes, et permet à plusieurs appareils de sauvegarder
 en même temps sans qu'aucun ne bloque les autres (chaque connexion/requête
 tourne dans sa propre goroutine).
 
-## Stockage adressé par contenu
+## Stockage : des fichiers, pas un dépôt
 
-`server/internal/storage` : chaque bloc de données est écrit une seule fois
-sur disque, nommé par son SHA-256 (`storage/chunks/ab/cd/<hash>`). Un
-fichier plus petit que la taille de bloc configurée (16 Mo par défaut) est
-un bloc unique ; un fichier plus gros est découpé séquentiellement.
+`server/internal/filestore` écrit chaque fichier tel quel, à son propre
+chemin, sous un dossier par machine :
 
-Une sauvegarde (« snapshot ») est un manifeste JSON
-(`storage/manifests/<device_id>/<snapshot_id>.json`) qui liste, pour chaque
-fichier, son chemin relatif, sa taille, sa date de modification, son
-empreinte globale et la liste des blocs qui le composent. Reconstruire un
-fichier au moment d'une restauration, c'est simplement retélécharger ses
-blocs dans l'ordre.
+```
+<racine>/<Nom du PC>-<id court>/Bureau/rapport.docx        <- la sauvegarde à jour
+<racine>/<Nom du PC>-<id court>/Documents/factures/2026.pdf
+<racine>/<Nom du PC>-<id court>/_anciennes_versions/2026-08-20_14-30/Bureau/...
+```
 
-Cette conception rend l'incrémental **gratuit** : un fichier identique
-resterait toujours le même hash, donc jamais réuploadé - y compris s'il
-existe déjà sur le serveur via un autre appareil.
+C'est le choix de conception central de ce logiciel, et il est délibéré :
+**une sauvegarde qu'on ne peut relire qu'avec l'outil qui l'a écrite est
+une sauvegarde qu'on risque de ne pas pouvoir relire**. Ici il n'y a ni
+format propriétaire, ni index à reconstruire, ni dépendance au logiciel :
+restaurer, c'est ouvrir le dossier de la machine et copier ce qu'on veut.
+
+La version précédente est un vrai arbre complet, navigable, dans lequel
+chaque fichier inchangé est un **lien physique** (`os.Link`) vers le
+fichier du miroir : la place n'est occupée qu'une fois, quel que soit le
+nombre de versions. Supprimer une ancienne version ne fait que retirer un
+lien ; les données ne disparaissent qu'avec le dernier. Là où les liens
+physiques ne sont pas disponibles (montages SMB/CIFS courants), le serveur
+bascule sur une recopie **côté serveur** : plus de disque consommé, mais
+toujours aucune retransmission réseau.
+
+Deux détails d'implémentation portent la correction de l'ensemble :
+
+- **Écriture par fichier temporaire + `rename`.** Le `rename` remplace
+  l'entrée de répertoire, pas le contenu du fichier : l'ancien inode - vers
+  lequel pointent toutes les versions précédentes - garde ses données.
+  Écrire directement dans le fichier de destination réécrirait d'un coup
+  toutes les versions qui le partagent, laissant un historique qui *paraît*
+  intact mais ne contient plus qu'un seul état.
+- **Validation des chemins (`RelPath`).** Un chemin arrive du réseau et
+  sert directement à écrire sur disque : tout ce qui contient `..`, une
+  lettre de lecteur, un caractère réservé ou le nom réservé
+  `_anciennes_versions` est refusé, pas nettoyé silencieusement.
+
+## Sauvegarde incrémentale sans empreintes
+
+Le cycle d'une sauvegarde tient en quatre appels :
+
+1. `POST /api/agent/snapshots` — demande un créneau (voir file d'attente).
+2. `POST /api/agent/snapshots/{id}/plan` — l'agent annonce **tout** ce que
+   la machine contient (chemin, taille, date de modification). Le serveur
+   conserve d'abord l'état courant en nouvelle version, aligne le miroir
+   sur ce que la machine n'a plus, puis répond avec la seule liste des
+   fichiers dont il n'a pas déjà une copie identique.
+3. `PUT /api/agent/files?path=…&mtime=…` — un appel par fichier demandé,
+   le corps est le fichier brut.
+4. `POST /api/agent/snapshots/{id}/finish` — clôture, libère le créneau,
+   déclenche la rotation de rétention.
+
+« Identique » = même taille et même date de modification. C'est ce que
+font tous les outils incrémentaux : lire et hacher chaque fichier des deux
+côtés à chaque passage coûterait bien plus cher que ce que ça économise.
+La date de modification stockée sur le NAS est celle du fichier au moment
+de l'envoi (relue à l'ouverture, pas celle du scan) - sinon la comparaison
+du run suivant porterait sur un état que le serveur ne détient pas, et le
+fichier repartirait indéfiniment.
+
+L'endpoint `plan` est volontairement **sans état entre les appels** : tout
+ce qu'il sait, il le lit sur le disque du NAS. Un serveur redémarré en
+plein milieu ne perd donc rien d'autre que la sauvegarde en cours.
 
 ## File d'attente des sauvegardes
 
@@ -98,25 +149,21 @@ silencieusement le cycle.
 `server/internal/scheduler` fait tourner, en tâche de fond :
 
 - **Rotation de rétention** (après chaque sauvegarde réussie, et en
-  balayage périodique de sécurité) : au-delà du nombre de sauvegardes à
-  conserver pour un appareil (réglable par appareil ou par défaut global),
-  les plus anciennes sont supprimées puis un garbage collector parcourt le
-  dépôt de blocs et supprime tout bloc qu'aucun manifeste restant ne
-  référence plus **et** qui n'a pas été écrit ou utilisé dans les
-  dernières 24 h (`chunkGracePeriod`).
+  balayage périodique de sécurité) : au-delà du nombre d'états à conserver
+  pour un appareil (réglable par appareil ou par défaut global, **minimum
+  2**), les plus anciennes versions sont supprimées.
 
-  Ce délai de grâce n'est pas cosmétique : un bloc n'est référencé par un
-  manifeste qu'à la *fin* d'une sauvegarde, alors que son envoi a pu durer
-  des heures. Sans lui, une rotation déclenchée par un autre appareil
-  pendant ce laps de temps supprimerait les blocs de la sauvegarde en
-  cours — la faisant échouer, ou pire, en cas de course avec l'écriture du
-  manifeste, laissant un snapshot marqué « réussi » dont les données ont
-  déjà disparu. Les blocs simplement *réutilisés* par déduplication sont
-  également « touchés » (`Store.Touch`, appelé à la vérification des
-  chunks) : sans cela, un bloc ancien emprunté par une nouvelle sauvegarde
-  resterait collectable si le snapshot qui l'avait initialement stocké
-  était purgé entre-temps. Le seul coût de ce délai est de retarder la
-  récupération d'espace ; le coût inverse serait une perte de données.
+  L'ordre des opérations est ce qui garantit qu'il reste toujours une
+  sauvegarde utilisable : la nouvelle version est créée **avant** que le
+  miroir ne soit modifié (dans `plan`), et la rotation ne tourne
+  qu'**après** la fin de la sauvegarde (dans `finish`). Il n'existe donc
+  aucun instant où la plus ancienne a été supprimée alors que la plus
+  récente est encore en cours d'écriture.
+
+  Le minimum de 2 n'est pas arbitraire : avec un seul état conservé, la
+  seule copie existante est le miroir en train d'être écrasé - un fichier
+  corrompu sur le PC se propage au NAS sans rien vers quoi revenir.
+
 - **Purge des événements** : la table `events` est bornée par ancienneté
   (jours) et par nombre de lignes maximum, tous deux réglables depuis
   **Paramètres**. Sans cette purge, une base SQLite accumulerait
@@ -154,7 +201,7 @@ la clé d'enrôlement). Approche 100 % portable, sans CGO, sans dépendance
 d'interface graphique.
 
 Ce popup n'apparaît que pour un déclenchement manuel ou distant
-(« Sauvegarder maintenant », « Restaurer ») - les sauvegardes planifiées
+(« Sauvegarder maintenant ») - les sauvegardes planifiées
 tournent silencieusement, comme la plupart des outils de sauvegarde grand
 public.
 
@@ -243,10 +290,13 @@ confirmation native puis la ressaisie exacte du nom de l'appareil (défense
 en profondeur côté serveur aussi : la requête est rejetée si le nom ne
 correspond pas). Si l'appareil est connecté, le serveur lui envoie une
 commande `uninstall` sur le canal WebSocket ; l'agent désenregistre son
-service/daemon, efface sa configuration locale (identifiants, cache de
-manifeste) et quitte. Le serveur supprime ensuite l'appareil et ses
-sauvegardes côté base et déclenche un garbage collection du dépôt de blocs,
-que l'agent ait pu être notifié ou non - si l'appareil était hors ligne au
+service/daemon, efface sa configuration locale (identifiants) et quitte.
+Le serveur supprime ensuite l'appareil en base **et son dossier complet
+sur le NAS**, versions précédentes comprises (en tâche de fond : effacer
+plusieurs Go sur un montage réseau ne doit pas faire pendre le panneau).
+Rien n'est partagé entre machines - chacune a son propre arbre - donc il
+n'y a rien à collecter ensuite. Que l'agent ait pu être notifié ou non - si
+l'appareil était hors ligne au
 moment du décommissionnement, sa prochaine tentative de connexion recevra
 une erreur d'authentification (secret révoqué) que l'agent interprète comme
 « je ne suis plus reconnu » : il efface alors sa propre configuration et
@@ -277,7 +327,7 @@ fenêtre cachée, menu contextuel), sans CGO. Son isolement en processus à
 part garantit qu'un problème dans l'icône n'affecte jamais le service de
 sauvegarde lui-même. Une reprogrammation locale ne fait que déplacer
 l'échéance planifiée normale ; une commande du serveur (`backup_now`,
-`restore`) est traitée indépendamment dans la boucle WebSocket principale
+`cancel`) est traitée indépendamment dans la boucle WebSocket principale
 et n'est donc jamais retardée par quoi que ce soit venant de l'icône -
 c'est ce qui garde le serveur prioritaire par construction, pas par une
 règle de priorité explicite à maintenir.
@@ -312,8 +362,8 @@ détecterait pas ce cas.
 - Binaire statique unique par plateforme : aucune dépendance runtime à
   installer sur le serveur Debian ni sur les postes clients.
 - Empreinte mémoire faible et stable (quelques Mo), démarrage instantané.
-- Concurrence native (goroutines) : chaque connexion agent, chaque upload
-  de bloc, chaque requête HTTP tourne dans sa propre goroutine sans le
+- Concurrence native (goroutines) : chaque connexion agent, chaque envoi
+  de fichier, chaque requête HTTP tourne dans sa propre goroutine sans le
   verrou global d'un interpréteur - plusieurs appareils sauvegardent
   réellement en parallèle sans configuration particulière.
 - Cross-compilation native vers Windows et macOS depuis Linux

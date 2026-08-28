@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"backup-server/internal/idgen"
@@ -109,9 +110,43 @@ func RenameDevice(db *sql.DB, id, name string) error {
 	return err
 }
 
-func UpdateDevicePolicy(db *sql.DB, id string, intervalMinutes, retentionCount *int, backupPaths string) error {
-	_, err := db.Exec(`UPDATE devices SET interval_minutes = ?, retention_count = ?, backup_paths = ? WHERE id = ?`,
-		nullableInt(intervalMinutes), nullableInt(retentionCount), backupPaths, id)
+// devicePolicyColumns are the per-device policy fields the panel may
+// update. Whitelisted rather than derived, since the caller passes column
+// names.
+var devicePolicyColumns = map[string]bool{
+	"interval_minutes": true,
+	"retention_count":  true,
+	"backup_paths":     true,
+}
+
+// UpdateDevicePolicy writes only the policy fields the caller actually
+// asked to change.
+//
+// Partial by design: the panel's PATCH sends one field at a time (a
+// rename, say), and an update that rewrote every column would clear the
+// operator's configured folder list every time they renamed a machine -
+// silently sending that PC back to backing up the default folders.
+func UpdateDevicePolicy(db *sql.DB, id string, set map[string]any) error {
+	if len(set) == 0 {
+		return nil
+	}
+	query := "UPDATE devices SET "
+	args := make([]any, 0, len(set)+1)
+	first := true
+	for col, v := range set {
+		if !devicePolicyColumns[col] {
+			return fmt.Errorf("colonne de politique inconnue: %s", col)
+		}
+		if !first {
+			query += ", "
+		}
+		query += col + " = ?"
+		args = append(args, v)
+		first = false
+	}
+	query += " WHERE id = ?"
+	args = append(args, id)
+	_, err := db.Exec(query, args...)
 	return err
 }
 

@@ -36,8 +36,14 @@
 					</div>
 					<div class="muted" style="font-size:.8rem; margin-top:4px;">Ex: pour une sauvegarde par semaine, mettez 7 et choisissez « jours ». Minimum 5 minutes.</div>
 
-					<label>Nombre de sauvegardes à conserver par défaut</label>
-					<input class="input" id="default-retention" type="number" min="1" required>
+					<label>Nombre d'états à conserver par défaut</label>
+					<input class="input" id="default-retention" type="number" min="2" required>
+					<div class="muted" style="font-size:.8rem; margin-top:4px;">
+						La sauvegarde à jour de la machine compte pour un état ; le reste sont
+						les versions précédentes. Minimum 2, pour qu'il reste toujours une
+						sauvegarde intacte pendant qu'une autre est écrite. L'ancienne n'est
+						supprimée qu'une fois la nouvelle terminée.
+					</div>
 
 					<label>Sauvegardes simultanées maximum</label>
 					<input class="input" id="max-concurrent" type="number" min="1" max="20" required>
@@ -140,7 +146,6 @@ async function loadSettings() {
 	document.getElementById("max-concurrent").value = s.max_concurrent_backups;
 	document.getElementById("event-days").value = s.event_retention_days;
 	document.getElementById("event-max-rows").value = s.event_retention_max_rows;
-	window.__chunkSize = s.chunk_size_bytes;
 }
 
 document.getElementById("test-storage-btn").addEventListener("click", async () => {
@@ -174,7 +179,6 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
 			max_concurrent_backups: parseInt(document.getElementById("max-concurrent").value, 10),
 			event_retention_days: parseInt(document.getElementById("event-days").value, 10),
 			event_retention_max_rows: parseInt(document.getElementById("event-max-rows").value, 10),
-			chunk_size_bytes: window.__chunkSize || 16777216,
 		});
 		toast("Paramètres enregistrés.", "success");
 	} catch (err) {

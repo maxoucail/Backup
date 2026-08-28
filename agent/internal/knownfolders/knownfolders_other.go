@@ -23,9 +23,9 @@ var errEmptyHome = errors.New("répertoire utilisateur vide")
 // redirection for the handful of folders this agent watches by default, so
 // the conventional <home>/<name> path is already correct. Returns "" if
 // the current user's home can't be determined at all; see ResolveErr for
-// why a low-stakes caller (the backup-time folder scan, which just skips
-// what it can't find) can use this, and why a caller where getting it
-// wrong is dangerous (restore) must use ResolveErr instead.
+// why the backup-time folder scan, which just skips what it can't find,
+// can use this, and why a caller that needs to tell "no such folder" apart
+// from "couldn't look" must use ResolveErr.
 func Resolve(name string) string {
 	p, err := ResolveErr(name)
 	if err != nil {

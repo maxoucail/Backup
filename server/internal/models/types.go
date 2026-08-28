@@ -20,7 +20,6 @@ type Settings struct {
 	DefaultRetentionCount  int    `json:"default_retention_count"`
 	EventRetentionDays     int    `json:"event_retention_days"`
 	EventRetentionMaxRows  int    `json:"event_retention_max_rows"`
-	ChunkSizeBytes         int64  `json:"chunk_size_bytes"`
 	// MaxConcurrentBackups caps how many devices may back up at the same
 	// time; the rest queue and are dispatched as slots free up. Default 1,
 	// so a single device saturating the NAS or the network link doesn't
@@ -77,7 +76,6 @@ type Snapshot struct {
 	UploadedBytes   int64      `json:"uploaded_bytes"`
 	ProgressPercent float64    `json:"progress_percent"`
 	ErrorMessage    string     `json:"error_message,omitempty"`
-	ManifestPath    string     `json:"-"`
 }
 
 const (

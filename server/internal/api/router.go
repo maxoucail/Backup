@@ -33,13 +33,13 @@ func (a *API) RegisterPanel(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/devices/{id}", a.requireSession(a.withPathID(a.handleDeleteDevice)))
 	mux.HandleFunc("POST /api/devices/{id}/decommission", a.requireSession(a.withPathID(a.handleDecommissionDevice)))
 	mux.HandleFunc("POST /api/devices/{id}/backup-now", a.requireSession(a.withPathID(a.handleBackupNow)))
-	mux.HandleFunc("POST /api/devices/{id}/restore", a.requireSession(a.withPathID(a.handleRestore)))
 	mux.HandleFunc("POST /api/devices/{id}/cancel", a.requireSession(a.withPathID(a.handleCancelJob)))
 	mux.HandleFunc("DELETE /api/devices/{id}/snapshots/{snapshotId}", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
 		a.handleDeleteSnapshot(w, r, r.PathValue("id"), r.PathValue("snapshotId"))
 	}))
-	mux.HandleFunc("POST /api/devices/{id}/snapshots/{snapshotId}/reassign", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
-		a.handleReassignSnapshot(w, r, r.PathValue("id"), r.PathValue("snapshotId"))
+	mux.HandleFunc("GET /api/devices/{id}/versions", a.requireSession(a.withPathID(a.handleListVersions)))
+	mux.HandleFunc("DELETE /api/devices/{id}/versions/{name}", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
+		a.handleDeleteVersion(w, r, r.PathValue("id"), r.PathValue("name"))
 	}))
 
 	mux.HandleFunc("GET /api/settings", a.requireSession(a.handleGetSettings))
@@ -58,29 +58,18 @@ func (a *API) RegisterPanel(mux *http.ServeMux) {
 }
 
 // RegisterAgent wires the device-secret-authenticated data plane
-// (enrollment, chunk upload/download, manifests, snapshot lifecycle) and
-// the WebSocket control channel. Meant to be bound to a port reachable
+// (enrollment, the incremental backup plan, file upload, snapshot
+// lifecycle) and the WebSocket control channel. Meant to be bound to a port reachable
 // from every VLAN/subnet a backed-up workstation might be on - unlike the
 // panel, this has to be broadly reachable for the product to work at all.
 func (a *API) RegisterAgent(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/agent/enroll", a.handleAgentEnroll)
 	mux.HandleFunc("GET /api/agent/config", a.requireDevice(a.handleAgentGetConfig))
 	mux.HandleFunc("POST /api/agent/snapshots", a.requireDevice(a.handleAgentCreateSnapshot))
-	mux.HandleFunc("POST /api/agent/snapshots/{id}/check-chunks", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
-		a.handleAgentCheckChunks(w, r, deviceID)
+	mux.HandleFunc("POST /api/agent/snapshots/{id}/plan", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
+		a.handleAgentPlan(w, r, deviceID, r.PathValue("id"))
 	}))
-	mux.HandleFunc("PUT /api/agent/chunks/{hash}", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
-		a.handleAgentUploadChunk(w, r, deviceID, r.PathValue("hash"))
-	}))
-	mux.HandleFunc("GET /api/agent/chunks/{hash}", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
-		a.handleAgentDownloadChunk(w, r, deviceID, r.PathValue("hash"))
-	}))
-	mux.HandleFunc("POST /api/agent/snapshots/{id}/manifest", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
-		a.handleAgentSubmitManifest(w, r, deviceID, r.PathValue("id"))
-	}))
-	mux.HandleFunc("GET /api/agent/snapshots/{id}/manifest", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
-		a.handleAgentGetManifest(w, r, deviceID, r.PathValue("id"))
-	}))
+	mux.HandleFunc("PUT /api/agent/files", a.requireDevice(a.handleAgentUploadFile))
 	mux.HandleFunc("POST /api/agent/snapshots/{id}/finish", a.requireDevice(func(w http.ResponseWriter, r *http.Request, deviceID string) {
 		a.handleAgentFinishSnapshot(w, r, deviceID, r.PathValue("id"))
 	}))

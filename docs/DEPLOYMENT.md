@@ -52,8 +52,44 @@ jour ne touche à aucune donnée.
 Depuis **Paramètres**, changez le champ *Chemin de stockage*. Le nouveau
 chemin est utilisé immédiatement pour toute nouvelle sauvegarde, mais les
 données existantes **ne sont pas migrées automatiquement** - copiez-les
-vous-même (`rsync -a ancien/ nouveau/`) si vous voulez les conserver
-accessibles.
+vous-même si vous voulez les conserver accessibles. Utilisez `rsync -aH`
+(le `-H` est important : il préserve les liens physiques entre le miroir
+et les anciennes versions ; sans lui, chaque version devient une copie
+complète et la place occupée peut être multipliée par le nombre de
+versions conservées) :
+
+```bash
+rsync -aH --info=progress2 /ancien/chemin/ /nouveau/chemin/
+```
+
+### Retrouver et restaurer des fichiers
+
+Il n'y a pas de fonction de restauration dans le logiciel : les fichiers
+sont sur le NAS en clair.
+
+1. Dans le panneau, ouvrez la fiche de l'appareil : la carte **Fichiers sur
+   le NAS** affiche le chemin exact de son dossier (bouton « Copier le
+   chemin ») et la liste des anciennes versions conservées.
+2. Ouvrez ce dossier depuis un explorateur de fichiers (partage réseau du
+   NAS, ou `ls`/`cp` en SSH sur le serveur).
+3. À la racine du dossier de la machine : l'état **à jour** de ses
+   dossiers (`Bureau/`, `Documents/`, …). Dans `_anciennes_versions/` :
+   les états précédents, un dossier par date, chacun complet.
+4. Copiez ce dont vous avez besoin et collez-le sur le poste.
+
+Les anciennes versions sont des liens physiques : elles n'occupent
+quasiment pas de place, et en supprimer une (depuis le panneau ou en
+`rm -rf`) ne touche jamais aux fichiers des autres versions.
+
+### Combien d'états conserver
+
+Le réglage **Nombre d'états à conserver** compte la sauvegarde à jour *plus*
+les versions précédentes. Le minimum est 2, et il est imposé côté serveur :
+avec un seul état, la seule copie existante serait le miroir en train
+d'être écrasé, donc un fichier corrompu sur le poste se propagerait au NAS
+sans rien vers quoi revenir. La rotation ne supprime la plus ancienne
+qu'une fois la nouvelle sauvegarde terminée : il reste toujours au moins
+une sauvegarde intacte.
 
 ## Agent Windows 11
 

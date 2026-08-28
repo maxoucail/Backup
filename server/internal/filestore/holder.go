@@ -1,11 +1,11 @@
-package storage
+package filestore
 
 import "sync"
 
 // Holder lets the storage root be changed at runtime (from the settings
-// panel) without restarting the server. It does not migrate existing
-// chunks/manifests to the new location - the panel warns the operator
-// about that before applying the change.
+// panel) without restarting the server. It does not move existing backups
+// to the new location - the panel warns the operator about that before
+// applying the change.
 type Holder struct {
 	mu    sync.RWMutex
 	store *Store

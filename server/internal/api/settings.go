@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"backup-server/internal/filestore"
 	"backup-server/internal/models"
-	"backup-server/internal/storage"
 )
 
 func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -26,8 +26,11 @@ func (a *API) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "requête invalide")
 		return
 	}
-	if req.DefaultRetentionCount < 1 {
-		writeError(w, http.StatusBadRequest, "le nombre de sauvegardes à conserver doit être au moins 1")
+	// Two is the floor, not one: with a single state kept, the only copy
+	// is the mirror being overwritten, so a file corrupted on the PC
+	// propagates to the NAS with nothing left to fall back on.
+	if req.DefaultRetentionCount < 2 {
+		writeError(w, http.StatusBadRequest, "le nombre de sauvegardes à conserver doit être au moins 2")
 		return
 	}
 	if req.DefaultIntervalMinutes < 5 {
@@ -50,7 +53,7 @@ func (a *API) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.StorageRoot != current.StorageRoot {
-		newStore, err := storage.New(req.StorageRoot)
+		newStore, err := filestore.New(req.StorageRoot)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "chemin de stockage inaccessible: "+err.Error())
 			return
