@@ -221,7 +221,9 @@ loop:
 // minutes can pass between the two, and what gets stored on the NAS has to
 // be described by the timestamp stored alongside it - otherwise the next
 // run's comparison is against a file the server never actually holds, and
-// it re-uploads forever.
+// it re-uploads forever. The full nanosecond precision is sent, not just
+// the second: that precision is what lets the server tell apart a real
+// edit from one that lands in the same second as a previous read.
 func uploadOne(ctx context.Context, c *client.Client, relPath, absPath string) (int64, error) {
 	if absPath == "" {
 		return 0, fmt.Errorf("chemin local inconnu")
@@ -239,7 +241,7 @@ func uploadOne(ctx context.Context, c *client.Client, relPath, absPath string) (
 		return 0, fmt.Errorf("n'est pas un fichier ordinaire")
 	}
 	size := info.Size()
-	if err := c.UploadFile(ctx, relPath, info.ModTime().Unix(), size, f); err != nil {
+	if err := c.UploadFile(ctx, relPath, info.ModTime().UnixNano(), size, f); err != nil {
 		return 0, err
 	}
 	return size, nil

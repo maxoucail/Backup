@@ -6,10 +6,13 @@
 //	<root>/<Nom du PC>/_anciennes_versions/2026-08-20_14-30/Bureau/...
 //
 // Restoring is opening the machine's folder in a file explorer and copying
-// what you need back. There is no proprietary format, no index to rebuild,
-// nothing that needs this software to be running - which is the whole
+// what you need back. There is no proprietary format, nothing that needs
+// this software to be running to read a file back - which is the whole
 // point: a backup you can only read with the tool that wrote it is a
-// backup you might not be able to read.
+// backup you might not be able to read. (One hidden bookkeeping file sits
+// alongside each machine's folder - see IndexFileName below - but it is
+// never needed to read the actual files; only to decide what needs
+// re-sending on the next backup.)
 //
 // The current backup sits at the top level because that's what gets
 // restored in practice. Previous versions live in _anciennes_versions and
@@ -28,9 +31,38 @@
 // Over the network only genuinely new or modified files move: the agent
 // announces what it has, and Plan replies with the subset the server
 // actually needs.
+//
+// # Detecting a modification correctly
+//
+// Deciding "has this file changed" never trusts a fresh stat() of the
+// copy sitting on the NAS. Two independent reasons:
+//
+//  1. Some NAS/SMB mounts don't give back the exact modification time
+//     they were asked to store - rounded to the nearest 1 or 2 seconds,
+//     or silently dropped altogether on some FAT-backed shares. If the
+//     comparison depended on that round trip, every file would look
+//     "changed" on every single backup, forever, and a backup meant to
+//     save bandwidth would instead re-upload the whole machine each time.
+//  2. Even a perfectly faithful filesystem only has one-second
+//     resolution here. A file edited twice within the same second the
+//     agent first read it would keep an identical size and an identical
+//     second on both edits - genuinely indistinguishable from an
+//     untouched file, and it would stay stale on the NAS forever. Silent
+//     data loss, the one failure a backup must not have.
+//
+// Instead this package keeps its own record, IndexFileName: for every
+// file it holds, exactly what the agent reported for it - size and
+// modification time, at full precision - at the moment it was actually
+// written. That record is this store's own memory of what it has, not a
+// question put to a filesystem that might answer differently than it was
+// told, and it closes both gaps: the comparison never depends on what the
+// NAS reports back, and the modification time it compares against came
+// straight from the agent's own clock at full (nanosecond) precision, not
+// truncated to a second.
 package filestore
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -51,6 +83,49 @@ const VersionsDirName = "_anciennes_versions"
 // versionTimeLayout names version directories in a form that sorts
 // chronologically as plain text and reads unambiguously in any locale.
 const versionTimeLayout = "2006-01-02_15-04"
+
+// IndexFileName is this store's own record of what it holds for a
+// machine: for every file, the size and modification time - at full
+// precision, exactly as the agent announced it - at the moment it was
+// last actually written. See the package doc for why comparisons are
+// made against this rather than against a fresh stat() of the NAS copy.
+//
+// A dot-prefixed name so it stays out of the way in a file explorer
+// (hidden by default on every platform this backs up), and reserved like
+// _anciennes_versions: nothing an agent announces may write to this name.
+const IndexFileName = ".backup-index.json"
+
+// pendingFilePrefix names the small per-backup record of which files this
+// run intends to update (see SavePendingUpdates / ConfirmUpdates). Also
+// reserved.
+const pendingFilePrefix = ".backup-attente-"
+
+// reservedNoDot and reservedPendingPrefixNoDot are IndexFileName and
+// pendingFilePrefix as they'd read after SanitizeSegment strips a leading
+// dot - which is exactly what happens to any agent-supplied path before
+// isReservedName ever sees it (see RelPath). Checked in addition to the
+// literal dotted forms so an agent can't create something that reads as
+// this package's own bookkeeping even without literally colliding with
+// it; the literal forms still matter for isReservedName's other callers
+// (SnapshotCurrent, PruneRemoved), which check real directory entries on
+// disk - written directly by this package, dot and all, never through
+// SanitizeSegment.
+const reservedNoDot = "backup-index.json"
+const reservedPendingPrefixNoDot = "backup-attente-"
+
+// isReservedName reports whether name is one of this package's own
+// bookkeeping files/folders rather than something a machine's files could
+// legitimately be called.
+func isReservedName(name string) bool {
+	if strings.EqualFold(name, VersionsDirName) {
+		return true
+	}
+	if strings.EqualFold(name, IndexFileName) || strings.EqualFold(name, reservedNoDot) {
+		return true
+	}
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(lower, pendingFilePrefix) || strings.HasPrefix(lower, reservedPendingPrefixNoDot)
+}
 
 type Store struct {
 	Root string
@@ -117,10 +192,11 @@ func (s *Store) DeviceDir(deviceID, deviceName string) string {
 // RelPath validates and normalises a path announced by an agent, and
 // returns it as a path relative to the machine's folder.
 //
-// Rejects anything that would escape that folder or collide with the
-// versions directory. A manifest arrives over the network: "Bureau/../..
-// /etc/passwd" must not become a write primitive, and a file called
-// "_anciennes_versions" must not shadow the version history.
+// Rejects anything that would escape that folder or collide with a name
+// this package reserves for its own bookkeeping (the versions directory,
+// the index). A manifest arrives over the network: "Bureau/../../etc/
+// passwd" must not become a write primitive, and a file called
+// "_anciennes_versions" or ".backup-index.json" must not shadow it.
 func RelPath(p string) (string, error) {
 	p = strings.ReplaceAll(p, "\\", "/")
 	parts := strings.Split(p, "/")
@@ -137,7 +213,7 @@ func RelPath(p string) (string, error) {
 	if len(clean) == 0 {
 		return "", fmt.Errorf("chemin vide")
 	}
-	if strings.EqualFold(clean[0], VersionsDirName) {
+	if isReservedName(clean[0]) {
 		return "", fmt.Errorf("chemin réservé: %s", p)
 	}
 	return filepath.Join(clean...), nil
@@ -166,7 +242,7 @@ func (s *Store) SnapshotCurrent(deviceDir string, at time.Time) (string, error) 
 	}
 	hasContent := false
 	for _, e := range entries {
-		if e.Name() != VersionsDirName {
+		if !isReservedName(e.Name()) {
 			hasContent = true
 			break
 		}
@@ -192,7 +268,7 @@ func (s *Store) SnapshotCurrent(deviceDir string, at time.Time) (string, error) 
 	}
 
 	for _, e := range entries {
-		if e.Name() == VersionsDirName {
+		if isReservedName(e.Name()) {
 			continue
 		}
 		if err := s.linkTree(filepath.Join(deviceDir, e.Name()), filepath.Join(versionDir, e.Name())); err != nil {
@@ -326,54 +402,192 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// NeededFiles compares what the machine holds against the live mirror and
-// returns the paths the server doesn't already have an identical copy of.
+// indexEntry is one file's confirmed record in IndexFileName: exactly
+// what the agent announced for it - size and modification time in
+// nanoseconds - at the moment it was last actually written here.
+type indexEntry struct {
+	Size    int64 `json:"size"`
+	ModTime int64 `json:"mtime"` // nanoseconds since epoch, as announced by the agent
+}
+
+type fileIndex map[string]indexEntry // keyed by RelPath
+
+func (s *Store) indexPath(deviceDir string) string {
+	return filepath.Join(deviceDir, IndexFileName)
+}
+
+func (s *Store) loadIndex(deviceDir string) fileIndex {
+	data, err := os.ReadFile(s.indexPath(deviceDir))
+	if err != nil {
+		return fileIndex{}
+	}
+	var idx fileIndex
+	if err := json.Unmarshal(data, &idx); err != nil {
+		return fileIndex{}
+	}
+	return idx
+}
+
+func (s *Store) saveIndex(deviceDir string, idx fileIndex) error {
+	if err := os.MkdirAll(deviceDir, 0o750); err != nil {
+		return err
+	}
+	data, err := json.Marshal(idx)
+	if err != nil {
+		return err
+	}
+	tmp := s.indexPath(deviceDir) + ".partiel"
+	if err := os.WriteFile(tmp, data, 0o640); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.indexPath(deviceDir)); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// NeededFiles compares what the machine holds against what this store has
+// confirmed it already holds, and returns the paths it doesn't have an
+// identical copy of.
 //
-// "Identical" means same size and same modification time, which is what
-// every incremental backup tool uses: reading and hashing every file on
-// both sides each run would cost far more than it saves. Any difference in
-// either - bigger, smaller, newer, *or older* (a file restored from an old
-// copy) - counts as a change.
+// The comparison is against IndexFileName - this store's own record of
+// what it has - never against a fresh stat() of the file sitting on the
+// NAS. See the package doc for why: some NAS mounts don't preserve the
+// exact modification time they were told to store, and even a faithful
+// one only has one-second resolution, which on its own can't tell apart
+// an untouched file from one edited twice within the same second.
 //
-// # The same-second blind spot, and why lastBackupStart closes it
+// A path with no confirmed record yet - typically right after upgrading
+// from a version that didn't keep one - falls back to comparing against
+// whatever is actually stored, so introducing the index doesn't force a
+// one-time re-upload of an entire, already-backed-up machine. The first
+// time that file is genuinely modified and re-sent, ConfirmUpdates gives
+// it a real record and this fallback stops applying to it. A file that
+// never changes again is never at risk either way - there's nothing for
+// any comparison method to miss.
 //
-// Modification times have one-second resolution here, so on their own they
-// miss one real case: a file modified again during the very second the
-// agent read it, ending up with the same size and the same second. Nothing
-// would ever look different again, and that file would stay stale on the
-// NAS forever - silent data loss, which is the one failure a backup must
-// not have.
-//
-// So a file whose modification time is at or after the start of the last
-// successful backup is always re-sent: it may have changed after we read
-// it, and we cannot prove otherwise. This costs one extra transfer for the
-// handful of files touched around backup time, and it is self-limiting -
-// on the run after that, lastBackupStart has moved past them and they go
-// back to being skipped.
-//
-// A zero lastBackupStart (no successful backup yet) disables that rule;
-// the size/time comparison alone still applies.
+// On top of either comparison, a file whose modification time is at or
+// after the start of the last successful backup is always re-sent
+// regardless: it may have changed after being read, and no comparison
+// this coarse can prove otherwise. This is what actually closes the
+// same-second gap - the index's nanosecond precision makes it extremely
+// unlikely on its own, but "extremely unlikely" is not the bar for a
+// backup. The cost is one extra transfer for the handful of files
+// touched around backup time, and it is self-limiting: on the run after
+// that, lastBackupStart has moved past them and they go back to being
+// skipped. A zero lastBackupStart (no successful backup yet) disables
+// this rule.
 func (s *Store) NeededFiles(deviceDir string, files []FileInfo, lastBackupStart time.Time) []string {
+	idx := s.loadIndex(deviceDir)
 	needed := make([]string, 0, len(files))
 	unstableFrom := int64(0)
 	if !lastBackupStart.IsZero() {
-		unstableFrom = lastBackupStart.Unix()
+		unstableFrom = lastBackupStart.UnixNano()
 	}
 	for _, f := range files {
 		rel, err := RelPath(f.Path)
 		if err != nil {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(deviceDir, rel))
-		if err != nil || info.Size() != f.Size || info.ModTime().Unix() != f.ModTime {
-			needed = append(needed, f.Path)
-			continue
+
+		if entry, known := idx[rel]; known {
+			if entry.Size != f.Size || entry.ModTime != f.ModTime {
+				needed = append(needed, f.Path)
+				continue
+			}
+		} else {
+			announcedSeconds := time.Unix(0, f.ModTime).Unix()
+			info, err := os.Stat(filepath.Join(deviceDir, rel))
+			if err != nil || info.Size() != f.Size || info.ModTime().Unix() != announcedSeconds {
+				needed = append(needed, f.Path)
+				continue
+			}
 		}
+
 		if unstableFrom != 0 && f.ModTime >= unstableFrom {
 			needed = append(needed, f.Path)
 		}
 	}
 	return needed
+}
+
+func (s *Store) pendingPath(deviceDir, snapshotID string) string {
+	return filepath.Join(deviceDir, pendingFilePrefix+SanitizeSegment(snapshotID)+".json")
+}
+
+// SavePendingUpdates records which files this backup intends to write and
+// what the agent announced for them, so ConfirmUpdates can later update
+// the index for whichever of them actually made it to disk. Called once
+// per backup with just the files NeededFiles asked for - not the whole
+// machine - so this costs nothing close to a full index rewrite.
+//
+// deviceDir may not exist yet: on a machine's very first backup, Plan
+// runs (and calls this) before WriteFile has created anything.
+func (s *Store) SavePendingUpdates(deviceDir, snapshotID string, files []FileInfo) error {
+	if err := os.MkdirAll(deviceDir, 0o750); err != nil {
+		return err
+	}
+	data, err := json.Marshal(files)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.pendingPath(deviceDir, snapshotID), data, 0o640)
+}
+
+// ConfirmUpdates finalises the index for one backup.
+//
+// For every file that backup intended to write, it checks whether the
+// file actually sitting on disk now matches the size that was announced -
+// deliberately just the size, not the stored modification time, since
+// trusting that would reintroduce the exact NAS round-trip problem this
+// index exists to avoid. A size match means the write reached disk, and
+// the index is given the agent's own precise modification time; a
+// mismatch (the file was skipped, failed, or this backup never got to it)
+// leaves whatever entry was already there, so that file is correctly
+// still seen as needing to be sent on the next backup.
+//
+// This is where the index is actually written to - once per backup, at
+// the size of what changed, never at the size of the whole machine.
+//
+// Safe to call with no matching pending file, and safe to call more than
+// once; both are no-ops. Called regardless of whether the backup as a
+// whole succeeded, failed or was cancelled: whatever files did land on
+// disk before that are genuinely there and should stop being flagged as
+// needed.
+func (s *Store) ConfirmUpdates(deviceDir, snapshotID string) {
+	path := s.pendingPath(deviceDir, snapshotID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	defer os.Remove(path)
+
+	var pending []FileInfo
+	if err := json.Unmarshal(data, &pending); err != nil {
+		log.Printf("index: fichier d'attente illisible pour %s: %v", deviceDir, err)
+		return
+	}
+
+	idx := s.loadIndex(deviceDir)
+	changed := false
+	for _, f := range pending {
+		rel, err := RelPath(f.Path)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(deviceDir, rel))
+		if err != nil || info.Size() != f.Size {
+			continue
+		}
+		idx[rel] = indexEntry{Size: f.Size, ModTime: f.ModTime}
+		changed = true
+	}
+	if changed {
+		if err := s.saveIndex(deviceDir, idx); err != nil {
+			log.Printf("index: enregistrement pour %s: %v", deviceDir, err)
+		}
+	}
 }
 
 // PruneRemoved deletes from the live mirror anything the machine no longer
@@ -402,7 +616,7 @@ func (s *Store) PruneRemoved(deviceDir string, files []FileInfo) (removed int) {
 				any = true
 				continue
 			}
-			if e.Name() == VersionsDirName && filepath.Dir(full) == deviceDir {
+			if isReservedName(e.Name()) && filepath.Dir(full) == deviceDir {
 				any = true
 				continue
 			}
@@ -427,7 +641,26 @@ func (s *Store) PruneRemoved(deviceDir string, files []FileInfo) (removed int) {
 		return any
 	}
 	walk(deviceDir)
+	s.pruneIndex(deviceDir, keep)
 	return removed
+}
+
+// pruneIndex drops index entries for files no longer on the machine, so
+// the index never claims to hold something PruneRemoved just deleted.
+func (s *Store) pruneIndex(deviceDir string, keep map[string]bool) {
+	idx := s.loadIndex(deviceDir)
+	changed := false
+	for rel := range idx {
+		if !keep[rel] {
+			delete(idx, rel)
+			changed = true
+		}
+	}
+	if changed {
+		if err := s.saveIndex(deviceDir, idx); err != nil {
+			log.Printf("index: purge pour %s: %v", deviceDir, err)
+		}
+	}
 }
 
 // WriteFile stores one uploaded file in the live mirror, at the same
@@ -477,7 +710,11 @@ func (s *Store) WriteFile(deviceDir, relPath string, r io.Reader, modTime int64)
 		return 0, err
 	}
 	if modTime > 0 {
-		t := time.Unix(modTime, 0)
+		// modTime is nanoseconds since epoch, exactly as the agent's own
+		// clock reported it - see IndexFileName. Applied here purely for
+		// an operator browsing the NAS to see a sensible date; comparison
+		// never depends on this surviving the round trip.
+		t := time.Unix(0, modTime)
 		_ = os.Chtimes(dest, t, t)
 	}
 	return n, nil

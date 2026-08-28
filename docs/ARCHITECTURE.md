@@ -129,17 +129,62 @@ pour la poignée de fichiers touchés au moment d'une sauvegarde, et la
 règle s'éteint d'elle-même : au passage suivant, la date de la dernière
 sauvegarde réussie les a dépassés et ils redeviennent ignorés.
 
-### Ce dont tout cela dépend : que le NAS conserve les dates
+### Un fichier séparé qui contient la date : l'index
 
-Tout l'incrémental repose sur un point : le stockage doit rendre la date
-de modification qu'on lui a demandé d'écrire. Un montage qui l'arrondit ou
-la perd (certains partages SMB/CIFS, tout ce qui est adossé à du FAT) fait
-paraître chaque fichier modifié à chaque passage - la machine retransfère
-tout son disque à chaque sauvegarde, sans rien dans les journaux qui
-l'explique. Le test de stockage (**Paramètres → Tester**) écrit donc une
-date connue sur son fichier témoin et la relit : si elle n'a pas survécu,
-il le signale comme une réserve explicite plutôt que de laisser
-l'opérateur le découvrir sur sa facture de bande passante.
+Les deux paragraphes précédents décrivaient un correctif ajouté après
+coup à une comparaison qui interrogeait le NAS à chaque fois
+(`os.Stat` sur le fichier stocké). Ce n'est plus comme ça que ça marche.
+
+`server/internal/filestore` tient son propre registre, dans un fichier cache
+`.backup-index.json` à la racine du dossier de chaque machine (masqué par
+le point, jamais dans l'arborescence visible Bureau/Documents) : pour
+chaque fichier, la taille et la date de modification **exactement comme
+l'agent les a annoncées**, à la nanoseconde, au moment où ce fichier a
+réellement été écrit. `NeededFiles` compare contre ce registre - jamais
+contre un nouvel appel `os.Stat` sur le fichier posé sur le NAS.
+
+Cette indirection règle les deux problèmes à la fois :
+
+- **Le NAS peut mentir sur la date sans que ça change rien.** Certains
+  montages SMB/CIFS arrondissent ou perdent la date de modification qu'on
+  leur demande d'écrire. Avec l'ancienne comparaison, ça rendait *chaque*
+  fichier "modifié" à *chaque* sauvegarde - la machine retransférait tout
+  son disque en boucle, sans rien dans les journaux pour l'expliquer.
+  Vérifié en conditions réelles : après avoir trafiqué à la main la date
+  du fichier stocké sur le "NAS" (`touch` vers l'année 2001), une
+  sauvegarde sans changement continue d'envoyer 0 octet - et une vraie
+  modification du même fichier est toujours détectée et envoyée.
+- **La date que l'agent envoie est à la nanoseconde**, pas à la seconde :
+  ça referme, à la source, la quasi-totalité des collisions que la règle
+  `lastBackupStart` (ci-dessus) existait pour rattraper après coup. Les
+  deux se cumulent : l'index rend une collision quasiment impossible, et
+  `lastBackupStart` couvre le résidu.
+
+**Comment le registre est tenu à jour**, en deux temps qui coûtent chacun
+une seule opération par sauvegarde, jamais une par fichier :
+
+1. `handleAgentPlan` note, dans un petit fichier `.backup-attente-<id>.json`
+   propre à cette sauvegarde, la liste (seulement les fichiers demandés,
+   pas toute la machine) de ce qu'il s'attend à recevoir.
+2. `handleAgentFinishSnapshot` appelle `ConfirmUpdates` : pour chaque
+   fichier de cette liste, il vérifie que la taille sur disque correspond
+   bien à ce qui était annoncé - la taille, jamais la date stockée, pour
+   ne pas réintroduire la dépendance à un `os.Stat` fiable qu'on vient
+   d'éliminer - puis met à jour le registre avec la date exacte annoncée
+   par l'agent. Un fichier prévu mais jamais réellement écrit (échec,
+   verrouillage) garde son ancienne entrée : il sera correctement redemandé
+   au tour suivant. Appelé quel que soit le statut final (succès, échec,
+   annulé) : tout ce qui a vraiment atteint le disque doit arrêter d'être
+   signalé comme manquant, même dans une sauvegarde par ailleurs ratée.
+
+**Migration** : une machine qui n'a pas encore d'entrée confirmée pour un
+fichier donné (typiquement juste après la mise à jour vers cette version)
+retombe sur la comparaison par `os.Stat`, exactement comme avant - la
+mise à jour n'oblige donc pas à retransférer une machine déjà sauvegardée
+en entier. Un fichier qui ne bouge plus jamais n'a de toute façon rien à
+perdre à rester sur cette ancienne comparaison ; c'est seulement le jour
+où il est vraiment modifié, et renvoyé, qu'il obtient une entrée confirmée
+et la protection complète.
 
 L'endpoint `plan` est volontairement **sans état entre les appels** : tout
 ce qu'il sait, il le lit sur le disque du NAS. Un serveur redémarré en

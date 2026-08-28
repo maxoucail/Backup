@@ -144,7 +144,7 @@ type FileEntry struct {
 	// _outside fallback when it's neither.
 	RelPath string
 	Size    int64
-	ModTime int64 // unix seconds
+	ModTime int64 // nanoseconds since epoch, at whatever precision the local filesystem gives
 }
 
 // Walk enumerates every regular file under the given roots. Errors on
@@ -190,7 +190,7 @@ func Walk(roots []Root) []FileEntry {
 				AbsPath: abs,
 				RelPath: relPath(root, home, abs),
 				Size:    info.Size(),
-				ModTime: info.ModTime().Unix(),
+				ModTime: info.ModTime().UnixNano(),
 			})
 			return nil
 		})

@@ -187,6 +187,7 @@ func (c *Client) Plan(ctx context.Context, snapshotID string, files []protocol.F
 
 // UploadFile sends one file's raw bytes; the server writes it, in clear, at
 // the same relative location under the machine's folder on the NAS.
+// modTime is nanoseconds since epoch (see protocol.FileInfo).
 func (c *Client) UploadFile(ctx context.Context, relPath string, modTime, size int64, r io.Reader) error {
 	q := url.Values{}
 	q.Set("path", relPath)

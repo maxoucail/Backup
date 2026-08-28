@@ -46,14 +46,18 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
   compare avec ce qu'il a déjà sur le NAS et ne redemande que les fichiers
   nouveaux ou modifiés. Une photothèque de 4 Go inchangée n'est jamais
   retransférée, ni réécrite.
-- **Un fichier modifié revient toujours** : n'importe quel écart de taille
-  ou de date compte comme une modification - plus gros, plus petit, plus
-  récent, **ou plus ancien** (un fichier remis en place depuis une vieille
-  copie). Et parce que les dates n'ont qu'une résolution d'une seconde, un
-  fichier modifié pendant la seconde même où l'agent l'a lu serait
-  invisible : tout fichier daté au démarrage de la dernière sauvegarde
-  réussie ou après est donc renvoyé d'office, une fois. Aucune
-  modification ne peut rester coincée sur le poste.
+- **Un fichier modifié revient toujours** : chaque machine a, à la racine
+  de son dossier, un petit fichier caché (`.backup-index.json`) qui note
+  la taille et la date exactes annoncées par l'agent pour chaque fichier
+  au moment où il a été écrit. La comparaison se fait contre ce registre,
+  jamais contre une nouvelle lecture du fichier posé sur le NAS - ce qui
+  élimine le risque qu'un montage réseau qui arrondit ou perd les dates
+  fasse croire que tout a changé à chaque sauvegarde. La date envoyée par
+  l'agent est à la nanoseconde, pas à la seconde, ce qui referme la quasi-
+  totalité des cas où un fichier modifié deux fois dans la même seconde
+  aurait pu passer inaperçu ; le résidu est couvert en renvoyant d'office
+  tout fichier daté au démarrage de la dernière sauvegarde réussie ou
+  après. Aucune modification ne peut rester coincée sur le poste.
 - **Anciennes versions quasi gratuites** : avant chaque mise à jour, l'état
   courant est conservé dans `_anciennes_versions/<date>/`. Chaque version
   est une arborescence complète et navigable, mais un fichier inchangé y

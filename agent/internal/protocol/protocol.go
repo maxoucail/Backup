@@ -8,9 +8,13 @@ package protocol
 
 // FileInfo is one entry of what this machine currently holds, as announced
 // to the server's plan endpoint. Size and mtime are what the server
-// compares against its own copy to decide whether the file needs sending -
-// no hashing on either side, which is what keeps a scan of a large disk
-// cheap.
+// compares against its own record to decide whether the file needs
+// sending - no hashing on either side, which is what keeps a scan of a
+// large disk cheap. ModTime is nanoseconds since epoch, read straight off
+// the local file at the moment it's opened for upload - full precision,
+// not truncated to the second - since the server's comparison depends on
+// it to tell apart a genuine edit from one that just happens to land in
+// the same second as a previous read.
 type FileInfo struct {
 	Path    string `json:"path"`
 	Size    int64  `json:"size"`

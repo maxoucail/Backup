@@ -150,6 +150,24 @@ func (a *API) handleAgentPlan(w http.ResponseWriter, r *http.Request, deviceID, 
 	}
 	needed := store.NeededFiles(deviceDir, req.Files, lastBackupStart)
 
+	// Recorded so that, once this backup finishes (see
+	// handleAgentFinishSnapshot), the index can be updated for exactly
+	// the files that actually made it to disk - see
+	// filestore.SavePendingUpdates / ConfirmUpdates.
+	neededSet := make(map[string]bool, len(needed))
+	for _, p := range needed {
+		neededSet[p] = true
+	}
+	pending := make([]filestore.FileInfo, 0, len(needed))
+	for _, f := range req.Files {
+		if neededSet[f.Path] {
+			pending = append(pending, f)
+		}
+	}
+	if err := store.SavePendingUpdates(deviceDir, snapshotID, pending); err != nil {
+		log.Printf("plan: enregistrement des mises à jour attendues pour %s: %v", device.Name, err)
+	}
+
 	var logicalBytes int64
 	for _, f := range req.Files {
 		logicalBytes += f.Size
@@ -210,6 +228,16 @@ func (a *API) handleAgentFinishSnapshot(w http.ResponseWriter, r *http.Request, 
 	if req.Status != models.SnapshotStatusSuccess && req.Status != models.SnapshotStatusFailed && req.Status != models.SnapshotStatusCancelled {
 		writeError(w, http.StatusBadRequest, "statut invalide")
 		return
+	}
+
+	// Whatever files actually reached disk this run get a confirmed index
+	// record now, whatever the final status - a backup that failed partway
+	// through still genuinely wrote some files, and those must stop being
+	// flagged as needing another upload. Done before releasing the queue
+	// slot so the next device's plan never races a still-being-written index.
+	if device, err := models.GetDevice(a.DB, deviceID); err == nil {
+		store := a.Store.Get()
+		store.ConfirmUpdates(store.DeviceDir(device.ID, device.Name), snapshotID)
 	}
 
 	_, _ = a.DB.Exec(`UPDATE snapshots SET uploaded_bytes = ? WHERE id = ?`, req.UploadedBytes, snapshotID)
