@@ -786,7 +786,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 // startTrayControlAPI exposes the small local HTTP API the tray helper
 // process (internal/tray, launched into the console session) talks to:
 // it has no other way to reach the service, and this is deliberately
-// tiny (four endpoints) since anything reachable on localhost by *any*
+// tiny (five endpoints) since anything reachable on localhost by *any*
 // process on the machine should stay minimal. A backup triggered here
 // goes through the exact same runBackup as a remote "Sauvegarder
 // maintenant" from the panel - the server's own commands (backup_now,
@@ -848,8 +848,14 @@ func startTrayControlAPI(
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
 
+	// Redirects to the server's self-service download page, not to
+	// cfg.ServerURL bare - that's the agent-facing API root, which has no
+	// page of its own to show a browser (a bare GET there 404s). /download
+	// is the one page on that same host and port meant to be opened by a
+	// human: no login required, reachable by any workstation being backed
+	// up, exactly like the page this agent itself was installed from.
 	mux.HandleFunc("GET /tray/open-panel", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, cfg.ServerURL, http.StatusFound)
+		http.Redirect(w, r, strings.TrimRight(cfg.ServerURL, "/")+"/download", http.StatusFound)
 	})
 
 	srv := &http.Server{Addr: trayControlAddr, Handler: mux}
@@ -878,6 +884,7 @@ const trayReschedulePageHTML = `<!doctype html>
 	input { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:9px 12px; border-radius:8px; font-size:.9rem; }
 	button { width:100%; margin-top:16px; background:var(--accent); color:#fff; border:none; padding:11px; border-radius:8px; font-weight:600; cursor:pointer; }
 	.msg { margin-top:10px; font-size:.85rem; text-align:center; }
+	.footer { text-align:center; margin-top:20px; font-size:.72rem; color:var(--dim); opacity:.7; }
 </style></head>
 <body><div class="card">
 	<h1>Reprogrammer la prochaine sauvegarde</h1>
@@ -885,6 +892,7 @@ const trayReschedulePageHTML = `<!doctype html>
 	<input type="datetime-local" id="dt">
 	<button id="go">Programmer</button>
 	<div class="msg" id="msg"></div>
+	<div class="footer">&copy; Dallaverde &mdash; Backup Agent</div>
 </div>
 <script>
 function pad(n){return String(n).padStart(2,"0");}

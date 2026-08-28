@@ -19,6 +19,7 @@
 	.bar > div { height:100%; background:linear-gradient(90deg,#4f8cff,#7c5cff); width:0%; transition:width .3s ease; }
 	.row { display:flex; justify-content:space-between; margin-top:12px; font-size:.85rem; color:var(--dim); }
 	.pct { font-size:1.6rem; font-weight:700; margin-top:16px; }
+	.footer { text-align:center; margin-top:22px; font-size:.72rem; color:var(--dim); opacity:.7; }
 </style>
 </head>
 <body>
@@ -31,15 +32,14 @@
 		<span id="detail"></span>
 		<span id="eta"></span>
 	</div>
+	<div class="footer">&copy; Dallaverde &mdash; Backup Agent</div>
 </div>
 <script>
 const phaseLabels = {
 	scanning: "Analyse des dossiers…",
-	hashing: "Vérification des fichiers modifiés…",
-	uploading: "Envoi des données vers le serveur…",
+	planning: "Comparaison avec le serveur…",
+	uploading: "Envoi des fichiers modifiés…",
 	finalizing: "Finalisation…",
-	fetching_manifest: "Récupération de la sauvegarde…",
-	restoring: "Restauration des fichiers…",
 	waiting: "Démarrage imminent…",
 };
 

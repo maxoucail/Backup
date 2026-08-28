@@ -19,6 +19,7 @@ package tray
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"runtime"
 	"syscall"
@@ -54,6 +55,7 @@ var (
 )
 
 const (
+	wmClose     = 0x0010
 	wmDestroy   = 0x0002
 	wmCommand   = 0x0111
 	wmTrayIcon  = 0x8000 + 1 // WM_APP + 1
@@ -82,7 +84,6 @@ const (
 	menuBackupNow  = 1001
 	menuReschedule = 1002
 	menuOpenPanel  = 1003
-	menuQuit       = 1004
 )
 
 type wndClassExW struct {
@@ -174,6 +175,9 @@ func Run(controlBase string) error {
 		case wmCommand:
 			handleCommand(uint32(wParam&0xFFFF), controlBase, httpClient)
 			return 0
+		case wmClose:
+			procDestroyWindow.Call(uintptr(hWnd))
+			return 0
 		case wmDestroy:
 			trayIcon.uFlags = 0
 			procShellNotifyIconW.Call(nimDelete, uintptr(unsafe.Pointer(&trayIcon)))
@@ -220,8 +224,24 @@ func Run(controlBase string) error {
 	// Background refresh: keep the tooltip current without blocking the
 	// message loop, which must stay responsive to clicks.
 	go func() {
+		const refreshInterval = 30 * time.Second
+		// Ten misses in a row is five minutes with no reply at all - long
+		// enough that a routine service restart never trips it, but a
+		// service that's actually stopped or uninstalled does.
+		const unreachableLimit = 10
+		consecutiveFailures := 0
 		for {
 			st, err := fetchState(controlBase, httpClient)
+			if err != nil {
+				consecutiveFailures++
+				if consecutiveFailures >= unreachableLimit {
+					log.Print("tray: service injoignable depuis longtemps, fermeture de l'icône")
+					procPostMessageW.Call(uintptr(hwnd), wmClose, 0, 0)
+					return
+				}
+			} else {
+				consecutiveFailures = 0
+			}
 			tip := "Backup Agent — état inconnu (service injoignable)"
 			if err == nil {
 				tip = "Backup Agent — " + summarize(st)
@@ -231,7 +251,7 @@ func Run(controlBase string) error {
 				setTip(&trayIcon.szTip, tip)
 				procShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&trayIcon)))
 			}
-			time.Sleep(30 * time.Second)
+			time.Sleep(refreshInterval)
 		}
 	}()
 
@@ -302,7 +322,6 @@ func showMenu(hwnd syscall.Handle, controlBase string, client *http.Client) {
 	procAppendMenuW.Call(menu, mfString, menuReschedule, uintptr(unsafe.Pointer(utf16("Reprogrammer la prochaine sauvegarde…"))))
 	procAppendMenuW.Call(menu, mfSeparator, 0, 0)
 	procAppendMenuW.Call(menu, mfString, menuOpenPanel, uintptr(unsafe.Pointer(utf16("Ouvrir le panneau"))))
-	procAppendMenuW.Call(menu, mfString, menuQuit, uintptr(unsafe.Pointer(utf16("Masquer l'icône"))))
 
 	var pt point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
@@ -332,7 +351,5 @@ func handleCommand(id uint32, controlBase string, client *http.Client) {
 		_ = osui.OpenBrowser(controlBase + "/tray/reschedule-page")
 	case menuOpenPanel:
 		_ = osui.OpenBrowser(controlBase + "/tray/open-panel")
-	case menuQuit:
-		procPostQuitMessage.Call(0)
 	}
 }
