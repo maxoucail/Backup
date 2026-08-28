@@ -676,12 +676,13 @@ func TestSavePendingUpdatesWorksBeforeTheDeviceFolderExists(t *testing.T) {
 	}
 }
 
-// The dashboard polls this every few seconds; without a cache, that's a
-// full recursive walk of every device's entire folder - versions included
-// - on every single poll. A second call right after the first must not
-// re-walk the disk: it must see the file that was added in between,
-// exactly as if a real walk had happened, but from the cache.
-func TestUsedBytesIsCachedBetweenCalls(t *testing.T) {
+// UsedBytes is no longer responsible for pacing how often it's called -
+// that job moved to the scheduler, which computes it periodically in the
+// background and records the result (see scheduler.refreshStorageUsage)
+// rather than calling this on a request path. So this package's own job
+// is simply: report what's actually there, right now, including a file
+// added between two calls.
+func TestUsedBytesReflectsWhatsActuallyThereOnEachCall(t *testing.T) {
 	s := newStore(t)
 	dir := s.DeviceDir("dev1", "PC")
 	put(t, s, dir, "Bureau/a.txt", "1234567", ns(1700000000))
@@ -694,29 +695,13 @@ func TestUsedBytesIsCachedBetweenCalls(t *testing.T) {
 		t.Fatalf("premier appel = %d, attendu 7", first)
 	}
 
-	// A file added right after must not show up yet: proof the second
-	// call actually came from the cache rather than re-walking.
 	put(t, s, dir, "Bureau/b.txt", "un fichier de plus", ns(1700000000))
 	second, err := s.UsedBytes()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second != first {
-		t.Fatalf("deuxième appel = %d, attendu %d (valeur en cache) : chaque appel refait le tour du disque", second, first)
-	}
-
-	// Once the cache is forced stale, the real, current total must come
-	// back - the cache must never get stuck serving an old value forever.
-	s.usedBytesMu.Lock()
-	s.usedBytesCachedAt = time.Now().Add(-usedBytesCacheTTL - time.Second)
-	s.usedBytesMu.Unlock()
-
-	third, err := s.UsedBytes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := int64(7 + len("un fichier de plus")); third != want {
-		t.Fatalf("après expiration du cache = %d, attendu %d", third, want)
+	if want := int64(7 + len("un fichier de plus")); second != want {
+		t.Fatalf("deuxième appel = %d, attendu %d : le fichier ajouté entre les deux appels n'est pas compté", second, want)
 	}
 }
 

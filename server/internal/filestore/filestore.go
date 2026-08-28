@@ -135,20 +135,7 @@ type Store struct {
 	linkChecked  bool
 	linkSupport  bool
 	linkWarnOnce sync.Once
-
-	// usedBytesMu guards the cache UsedBytes keeps to avoid re-walking the
-	// entire storage tree on every call - see UsedBytes.
-	usedBytesMu       sync.Mutex
-	usedBytesCache    int64
-	usedBytesCachedAt time.Time
 }
-
-// usedBytesCacheTTL bounds how often UsedBytes actually walks the disk.
-// The dashboard that calls it polls every few seconds, and "storage used"
-// is the kind of number nobody needs to the second - a walk at most every
-// 30s is a far better trade than a full recursive scan of every device's
-// entire folder, versions included, on every single poll.
-const usedBytesCacheTTL = 30 * time.Second
 
 func New(root string) (*Store, error) {
 	if root == "" {
@@ -810,19 +797,13 @@ func (s *Store) Rotate(deviceDir string, keepVersions int) (deleted int) {
 // the NAS itself reports rather than the sum of every version's apparent
 // size.
 //
-// Cached for usedBytesCacheTTL (see its doc): a full walk of the whole
-// storage tree - every device, every previous version - on every call
-// would mean the dashboard triggering one on every poll, several times a
-// minute, for a figure that only needs to be roughly current.
+// A full walk of the whole storage tree - every device, every previous
+// version - so this is genuinely expensive on a real network mount (a
+// stat() per file, over the network). Not meant to be called on a
+// request path: the scheduler calls this periodically in the background
+// and records the result (see scheduler.refreshStorageUsage), and the
+// dashboard just reads that.
 func (s *Store) UsedBytes() (int64, error) {
-	s.usedBytesMu.Lock()
-	if fresh := time.Since(s.usedBytesCachedAt) < usedBytesCacheTTL; fresh {
-		v := s.usedBytesCache
-		s.usedBytesMu.Unlock()
-		return v, nil
-	}
-	s.usedBytesMu.Unlock()
-
 	var total int64
 	seen := make(map[uint64]bool)
 	err := filepath.Walk(s.Root, func(_ string, info os.FileInfo, err error) error {
@@ -838,15 +819,7 @@ func (s *Store) UsedBytes() (int64, error) {
 		total += info.Size()
 		return nil
 	})
-	if err != nil {
-		return 0, err
-	}
-
-	s.usedBytesMu.Lock()
-	s.usedBytesCache = total
-	s.usedBytesCachedAt = time.Now()
-	s.usedBytesMu.Unlock()
-	return total, nil
+	return total, err
 }
 
 // DeviceUsedBytes is UsedBytes for one machine's folder.

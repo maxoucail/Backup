@@ -37,7 +37,14 @@ CREATE TABLE IF NOT EXISTS settings (
 	-- an existing database still satisfies its NOT NULL constraint.
 	chunk_size_bytes INTEGER NOT NULL DEFAULT 16777216,
 	max_concurrent_backups INTEGER NOT NULL DEFAULT 1,
-	static_enrollment_token TEXT NOT NULL DEFAULT ''
+	static_enrollment_token TEXT NOT NULL DEFAULT '',
+	-- Storage usage is expensive to compute (a full walk of the NAS tree -
+	-- see filestore.UsedBytes) and cheap to serve once known, so it's
+	-- refreshed periodically by the scheduler rather than on every
+	-- dashboard load. storage_used_at is NULL until the first refresh
+	-- completes.
+	storage_used_bytes INTEGER NOT NULL DEFAULT 0,
+	storage_used_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS enrollment_keys (
@@ -134,6 +141,8 @@ func migrate(sqlDB *sql.DB) error {
 		// hash (by design, one-way) can't support. See
 		// models.GetOrCreateStaticEnrollmentToken.
 		{"settings", "static_enrollment_token", "TEXT NOT NULL DEFAULT ''"},
+		{"settings", "storage_used_bytes", "INTEGER NOT NULL DEFAULT 0"},
+		{"settings", "storage_used_at", "DATETIME"},
 	}
 	for _, c := range columns {
 		exists, err := columnExists(sqlDB, c.table, c.column)

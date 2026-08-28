@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"backup-server/internal/models"
 )
@@ -44,16 +45,26 @@ func (a *API) handleDashboardDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDashboardStorage reports total space used across the whole NAS.
-// Isolated in its own endpoint on purpose: this is the one figure on the
-// dashboard that can be genuinely slow to compute fresh (a full walk of
-// every device's folder, cached for 30s - see filestore.UsedBytes), and
-// it must never hold up the rest of the page while it works.
+//
+// A plain database read, never a filesystem walk: computing this figure
+// means walking every device's entire folder (see filestore.UsedBytes),
+// which on a real network mount is a stat() per file over the network,
+// not a local disk operation - far too slow to redo on every dashboard
+// load. The scheduler recomputes it periodically in the background (see
+// scheduler.refreshStorageUsage) and this just serves whatever it last
+// wrote, so a request here is always fast regardless of how large or how
+// slow to reach the NAS is.
 func (a *API) handleDashboardStorage(w http.ResponseWriter, r *http.Request) {
-	usedBytes, err := a.Store.Get().UsedBytes()
+	usedBytes, at, err := models.GetStorageUsage(a.DB)
 	if err != nil {
-		usedBytes = 0
+		writeError(w, http.StatusInternalServerError, "erreur serveur")
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"storage_used_bytes": usedBytes})
+	resp := map[string]any{"storage_used_bytes": usedBytes}
+	if !at.IsZero() {
+		resp["computed_at"] = at.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleDashboardBackupsPerDay feeds the "backups per day" chart.

@@ -250,6 +250,16 @@ silencieusement le cycle.
 - **Détection de déconnexion** : un appareil qui ne s'est pas manifesté
   depuis 10 minutes bascule à "hors ligne" même si la coupure réseau a été
   brutale (pas de fermeture propre du WebSocket).
+- **Stockage utilisé** : calculé en marchant sur tout l'arbre du NAS -
+  chaque appareil, chaque ancienne version - ce qui est bon marché sur un
+  disque local mais lent sur un vrai montage réseau (CIFS/SMB), où chaque
+  fichier rencontré coûte un aller-retour. Recalculé toutes les 5 minutes
+  et écrit dans `settings.storage_used_bytes`/`storage_used_at` plutôt que
+  calculé à la demande : `GET /api/dashboard/storage` ne fait qu'une
+  lecture de ces deux colonnes, jamais un parcours du NAS sur le chemin de
+  la requête. Un calcul a aussi lieu une fois au démarrage du serveur,
+  avant d'entrer dans la boucle des tickers, pour qu'un redémarrage
+  (chaque déploiement en fait un) n'affiche pas "0 o" pendant 5 minutes.
 
 ## Agent : identification et politique
 

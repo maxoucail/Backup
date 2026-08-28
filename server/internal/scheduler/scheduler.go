@@ -1,8 +1,9 @@
 // Package scheduler runs the server's background maintenance: rotating
 // retention (deleting a machine's oldest previous versions past the
 // configured limit), purging old event log rows so the database stays
-// small, marking devices offline when their agent stops checking in, and
-// cleaning up expired enrollment keys.
+// small, marking devices offline when their agent stops checking in,
+// cleaning up expired enrollment keys, and periodically recomputing total
+// storage usage.
 package scheduler
 
 import (
@@ -110,8 +111,36 @@ func releaseUnconfirmedBackups(db *sql.DB, q *queue.Manager) {
 	}
 }
 
+// storageUsageRefreshEvery is how often (in 1-minute ticks) the fleet-wide
+// storage figure is recomputed - see refreshStorageUsage. A full walk of
+// the NAS tree is the one genuinely expensive thing this package does, so
+// it runs on its own, coarser cadence rather than every tick: the
+// dashboard reads whatever this last wrote, never triggering a walk
+// itself.
+const storageUsageRefreshEvery = 5
+
+// refreshStorageUsage recomputes total storage usage and records it, so
+// GET /api/dashboard/storage is a plain, fast database read - never a
+// filesystem walk on the request path. Logged but not fatal on failure:
+// the dashboard keeps serving whatever figure it last managed to compute.
+func refreshStorageUsage(db *sql.DB, store *filestore.Holder) {
+	usedBytes, err := store.Get().UsedBytes()
+	if err != nil {
+		log.Printf("scheduler: calcul du stockage utilisé: %v", err)
+		return
+	}
+	if err := models.UpdateStorageUsage(db, usedBytes); err != nil {
+		log.Printf("scheduler: enregistrement du stockage utilisé: %v", err)
+	}
+}
+
 // Run blocks, performing periodic maintenance until ctx is cancelled.
 func Run(ctx context.Context, db *sql.DB, store *filestore.Holder, q *queue.Manager) {
+	// Computed once up front rather than waiting for the first tick: a
+	// server that just started (every deploy restarts it) would otherwise
+	// show no storage figure at all for the first several minutes.
+	refreshStorageUsage(db, store)
+
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -124,6 +153,10 @@ func Run(ctx context.Context, db *sql.DB, store *filestore.Holder, q *queue.Mana
 			return
 		case <-ticker.C:
 			tick++
+
+			if tick%storageUsageRefreshEvery == 0 {
+				refreshStorageUsage(db, store)
+			}
 
 			if n, err := models.MarkStaleDevicesOffline(db, staleDeviceAfter); err != nil {
 				log.Printf("scheduler: mark stale devices: %v", err)
