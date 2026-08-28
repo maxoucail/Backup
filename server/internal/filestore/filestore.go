@@ -909,6 +909,40 @@ func (s *Store) checkInsideRoot(dir string) error {
 	return nil
 }
 
+// RemoveCurrent wipes a machine's live mirror - its up-to-date backup -
+// while leaving every previous version in _anciennes_versions untouched.
+// An operator reaches for this to force a completely clean re-capture
+// (a live copy suspected corrupted or infected, say) without losing the
+// historical states already kept.
+//
+// This also clears the index (see IndexFileName): with the files gone,
+// any index entries that survived would make the next backup wrongly
+// believe the NAS still holds them, and skip re-uploading exactly what
+// was just deleted. Deleting everything except VersionsDirName already
+// takes the index with it, since it lives at the same level as the real
+// folders, not inside VersionsDirName.
+func (s *Store) RemoveCurrent(deviceDir string) error {
+	if err := s.checkInsideRoot(deviceDir); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(deviceDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // never backed up: nothing to remove
+		}
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == VersionsDirName {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(deviceDir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RemoveDevice deletes a machine's whole folder, versions included.
 func (s *Store) RemoveDevice(deviceDir string) error {
 	if err := s.checkInsideRoot(deviceDir); err != nil {

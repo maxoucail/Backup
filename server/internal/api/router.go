@@ -41,6 +41,7 @@ func (a *API) RegisterPanel(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/devices/{id}/versions/{name}", a.requireSession(func(w http.ResponseWriter, r *http.Request) {
 		a.handleDeleteVersion(w, r, r.PathValue("id"), r.PathValue("name"))
 	}))
+	mux.HandleFunc("DELETE /api/devices/{id}/current", a.requireSession(a.withPathID(a.handleDeleteCurrent)))
 
 	mux.HandleFunc("GET /api/settings", a.requireSession(a.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", a.requireSession(a.handleUpdateSettings))

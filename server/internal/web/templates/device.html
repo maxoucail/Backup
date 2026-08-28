@@ -53,12 +53,12 @@
 				<code id="storage-dir" class="storage-path">…</code>
 				<button class="btn secondary small" id="copy-path-btn">Copier le chemin</button>
 			</div>
-			<div class="section-title" style="font-size:13px;">Versions précédentes conservées</div>
+			<div class="section-title" style="font-size:13px;">Versions disponibles</div>
 			<table>
 				<thead><tr><th>Version</th><th>Emplacement</th><th>Taille</th><th></th></tr></thead>
 				<tbody id="versions-body"></tbody>
 			</table>
-			<div id="versions-empty" class="empty-state" style="display:none;">Aucune version précédente pour l'instant : la première sauvegarde est la seule copie existante.</div>
+			<div id="versions-empty" class="empty-state" style="display:none;">Cet appareil n'a encore jamais été sauvegardé.</div>
 		</div>
 
 		<div class="card">
@@ -80,6 +80,19 @@
 		<div class="row" style="justify-content:flex-end; margin-top:18px;">
 			<button class="btn secondary" id="decommission-cancel">Annuler</button>
 			<button class="btn danger" id="decommission-confirm" disabled>Décommissionner définitivement</button>
+		</div>
+	</div>
+</div>
+
+<div class="modal-backdrop" id="delete-files-modal" style="display:none;">
+	<div class="modal">
+		<h3 id="delete-files-title">Supprimer</h3>
+		<p class="muted" id="delete-files-warning"></p>
+		<label>Tapez <strong id="delete-files-hint"></strong> pour confirmer</label>
+		<input class="input" id="delete-files-confirm-input" autocomplete="off">
+		<div class="row" style="justify-content:flex-end; margin-top:18px;">
+			<button class="btn secondary" id="delete-files-cancel">Annuler</button>
+			<button class="btn danger" id="delete-files-confirm" disabled>Supprimer définitivement</button>
 		</div>
 	</div>
 </div>
@@ -192,6 +205,15 @@ async function deleteSnapshot(snapshotId) {
 	}
 }
 
+function currentRow(storageDir, usedBytes) {
+	return `<tr>
+		<td><strong>Actuelle</strong> <span class="muted">(à jour)</span></td>
+		<td><code class="storage-path">${storageDir}</code></td>
+		<td>${fmtBytes(usedBytes)}</td>
+		<td><button class="btn danger small" onclick="deleteCurrent()">Supprimer</button></td>
+	</tr>`;
+}
+
 function versionRow(v) {
 	return `<tr>
 		<td>${v.name}</td>
@@ -201,15 +223,75 @@ function versionRow(v) {
 	</tr>`;
 }
 
+// pendingDelete holds what the currently-open delete-files-modal will
+// actually do once the typed confirmation matches - shared between the
+// "current" and "previous version" delete flows so there's one modal and
+// one confirmation mechanism to get right, not two.
+let pendingDelete = null;
+
+function askDeleteFiles({ title, warning, expectedName, onConfirm }) {
+	pendingDelete = { expectedName, onConfirm };
+	document.getElementById("delete-files-title").textContent = title;
+	document.getElementById("delete-files-warning").textContent = warning;
+	document.getElementById("delete-files-hint").textContent = expectedName;
+	document.getElementById("delete-files-confirm-input").value = "";
+	document.getElementById("delete-files-confirm").disabled = true;
+	document.getElementById("delete-files-modal").style.display = "flex";
+}
+
+document.getElementById("delete-files-cancel").addEventListener("click", () => {
+	document.getElementById("delete-files-modal").style.display = "none";
+	pendingDelete = null;
+});
+document.getElementById("delete-files-confirm-input").addEventListener("input", (e) => {
+	document.getElementById("delete-files-confirm").disabled = !pendingDelete || e.target.value !== pendingDelete.expectedName;
+});
+document.getElementById("delete-files-confirm").addEventListener("click", async () => {
+	if (!pendingDelete) return;
+	const { onConfirm } = pendingDelete;
+	document.getElementById("delete-files-modal").style.display = "none";
+	pendingDelete = null;
+	await onConfirm();
+});
+
+// Two confirmations on purpose, same as decommissioning: a first quick
+// browser dialog explaining the consequence, then the modal above, which
+// only unlocks once the exact name is retyped - real files on the NAS
+// are gone the moment this runs, with no undo.
 async function deleteVersion(name) {
 	if (!confirm(`Supprimer définitivement l'ancienne version « ${name} » ? La sauvegarde à jour de la machine n'est pas touchée.`)) return;
-	try {
-		await api("DELETE", `/api/devices/${deviceId}/versions/${encodeURIComponent(name)}`);
-		toast("Ancienne version supprimée.", "success");
-		loadVersions();
-	} catch (err) {
-		toast(err.message, "error");
-	}
+	askDeleteFiles({
+		title: "Supprimer cette ancienne version",
+		warning: `Supprime définitivement la version « ${name} » du NAS. La sauvegarde à jour de la machine n'est pas touchée.`,
+		expectedName: name,
+		onConfirm: async () => {
+			try {
+				await api("DELETE", `/api/devices/${deviceId}/versions/${encodeURIComponent(name)}`, { confirm_name: name });
+				toast("Ancienne version supprimée.", "success");
+				loadVersions();
+			} catch (err) {
+				toast(err.message, "error");
+			}
+		},
+	});
+}
+
+async function deleteCurrent() {
+	if (!confirm("Supprimer la sauvegarde actuelle de cet appareil ? La prochaine sauvegarde repartira de zéro.")) return;
+	askDeleteFiles({
+		title: "Supprimer la sauvegarde actuelle",
+		warning: `Supprime définitivement tous les fichiers à jour de « ${currentDeviceName} » sur le NAS. Les versions précédentes conservées ne sont pas touchées, mais la prochaine sauvegarde devra tout renvoyer depuis le poste.`,
+		expectedName: currentDeviceName,
+		onConfirm: async () => {
+			try {
+				await api("DELETE", `/api/devices/${deviceId}/current`, { confirm_name: currentDeviceName });
+				toast("Sauvegarde actuelle supprimée.", "success");
+				loadVersions();
+			} catch (err) {
+				toast(err.message, "error");
+			}
+		},
+	});
 }
 
 async function loadVersions() {
@@ -217,8 +299,10 @@ async function loadVersions() {
 		const data = await api("GET", `/api/devices/${deviceId}/versions`);
 		document.getElementById("storage-dir").textContent = data.storage_dir || "—";
 		const versions = data.versions || [];
-		document.getElementById("versions-body").innerHTML = versions.map(versionRow).join("");
-		document.getElementById("versions-empty").style.display = versions.length ? "none" : "block";
+		const hasCurrent = data.used_bytes > 0 || versions.length > 0;
+		const rows = hasCurrent ? [currentRow(data.storage_dir, data.used_bytes)] : [];
+		document.getElementById("versions-body").innerHTML = rows.concat(versions.map(versionRow)).join("");
+		document.getElementById("versions-empty").style.display = hasCurrent ? "none" : "block";
 	} catch (err) {
 		document.getElementById("storage-dir").textContent = "indisponible";
 	}

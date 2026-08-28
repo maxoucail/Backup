@@ -121,8 +121,11 @@ agent/    Agent client (Windows / macOS, tourne aussi sur Linux)
   dossiers utilisateur sont rangés sous `_outside/`.
 - **Le panneau vous dit où aller** : la fiche d'un appareil affiche le
   chemin exact de son dossier sur le NAS (avec un bouton « Copier le
-  chemin »), la liste des anciennes versions conservées avec leur taille,
-  et un bouton pour en supprimer une.
+  chemin ») et la liste de toutes les versions disponibles - la
+  sauvegarde à jour comme chaque ancienne version conservée - avec leur
+  taille. Chacune a son propre bouton de suppression, verrouillé par une
+  double confirmation (dialogue puis retaper le nom exact) puisqu'il
+  s'agit de vrais fichiers sans retour en arrière possible.
 - **Icône dans la barre des tâches (Windows)** : affiche la date de la
   dernière sauvegarde et permet de sauvegarder maintenant ou de
   reprogrammer la prochaine sauvegarde - sans jamais bloquer un

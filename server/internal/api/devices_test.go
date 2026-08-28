@@ -212,3 +212,86 @@ func TestStorageTestReportsWhetherModificationTimesSurvive(t *testing.T) {
 		t.Fatalf("réserve inattendue sur un disque local: %s", res.Warning)
 	}
 }
+
+func httpReqJSON(t *testing.T, method, target, body string) *http.Request {
+	t.Helper()
+	return httptest.NewRequest(method, target, strings.NewReader(body))
+}
+
+// Deleting an old version deletes real files with no undo, so the wrong
+// (or missing) confirmation must be refused server-side - not just by the
+// panel's own dialog, which a direct API call bypasses entirely.
+func TestDeleteVersionRequiresRetypingTheExactVersionName(t *testing.T) {
+	a, id := testAPI(t)
+	store := a.Store.Get()
+	device, _ := models.GetDevice(a.DB, id)
+	dir := store.DeviceDir(device.ID, device.Name)
+	if _, err := store.WriteFile(dir, "Bureau/a.txt", strings.NewReader("v1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SnapshotCurrent(dir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	name := store.ListVersions(dir)[0]
+
+	for _, body := range []string{`{}`, `{"confirm_name":"pas le bon nom"}`, `{"confirm_name":""}`} {
+		w := httptest.NewRecorder()
+		a.handleDeleteVersion(w, httpReqJSON(t, http.MethodDelete, "/api/devices/"+id+"/versions/"+name, body), id, name)
+		if w.Code == http.StatusOK {
+			t.Fatalf("suppression acceptée sans la bonne confirmation (body=%s)", body)
+		}
+	}
+	if len(store.ListVersions(dir)) != 1 {
+		t.Fatal("la version a été supprimée malgré une confirmation absente ou incorrecte")
+	}
+
+	w := httptest.NewRecorder()
+	a.handleDeleteVersion(w, httpReqJSON(t, http.MethodDelete, "/api/devices/"+id+"/versions/"+name, `{"confirm_name":"`+name+`"}`), id, name)
+	if w.Code != http.StatusOK {
+		t.Fatalf("suppression refusée avec la bonne confirmation: %d %s", w.Code, w.Body.String())
+	}
+	if len(store.ListVersions(dir)) != 0 {
+		t.Fatal("la version existe encore après une suppression confirmée")
+	}
+}
+
+// Deleting the live mirror is the most destructive single action this
+// panel offers short of decommissioning a device outright - it must
+// require the exact device name, same as decommissioning does, and must
+// never touch previous versions.
+func TestDeleteCurrentRequiresRetypingTheDeviceNameAndKeepsVersions(t *testing.T) {
+	a, id := testAPI(t)
+	store := a.Store.Get()
+	device, _ := models.GetDevice(a.DB, id)
+	dir := store.DeviceDir(device.ID, device.Name)
+	if _, err := store.WriteFile(dir, "Bureau/a.txt", strings.NewReader("v1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SnapshotCurrent(dir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WriteFile(dir, "Bureau/a.txt", strings.NewReader("v2"), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	a.handleDeleteCurrent(w, httpReqJSON(t, http.MethodDelete, "/api/devices/"+id+"/current", `{"confirm_name":"mauvais nom"}`), id)
+	if w.Code == http.StatusOK {
+		t.Fatal("suppression de la sauvegarde actuelle acceptée sans la bonne confirmation")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Bureau", "a.txt")); err != nil {
+		t.Fatal("le fichier actuel a été supprimé malgré une confirmation incorrecte")
+	}
+
+	w = httptest.NewRecorder()
+	a.handleDeleteCurrent(w, httpReqJSON(t, http.MethodDelete, "/api/devices/"+id+"/current", `{"confirm_name":"`+device.Name+`"}`), id)
+	if w.Code != http.StatusOK {
+		t.Fatalf("suppression refusée avec la bonne confirmation: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Bureau", "a.txt")); !os.IsNotExist(err) {
+		t.Fatal("le fichier actuel existe encore après une suppression confirmée")
+	}
+	if len(store.ListVersions(dir)) != 1 {
+		t.Fatal("les versions précédentes ont été touchées par la suppression de la sauvegarde actuelle")
+	}
+}

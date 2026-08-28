@@ -331,13 +331,31 @@ func (a *API) handleListVersions(w http.ResponseWriter, r *http.Request, id stri
 	})
 }
 
+type deleteFilesRequest struct {
+	ConfirmName string `json:"confirm_name"`
+}
+
 // handleDeleteVersion drops one previous version. The live mirror is never
-// touched here: it is the machine's current backup, and there is no
-// situation where deleting it from the panel is what an operator meant.
+// touched here - see handleDeleteCurrent for that, a deliberately separate
+// and more heavily guarded action.
+//
+// Requires retyping the exact version name being deleted, checked here
+// server-side rather than trusted to the panel's own confirmation dialog:
+// this deletes real files on the NAS with no undo, so the guard has to
+// hold even against a direct API call, not just a careless click.
 func (a *API) handleDeleteVersion(w http.ResponseWriter, r *http.Request, id, name string) {
 	device, err := models.GetDevice(a.DB, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "appareil introuvable")
+		return
+	}
+	var req deleteFilesRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "requête invalide")
+		return
+	}
+	if strings.TrimSpace(req.ConfirmName) != name {
+		writeError(w, http.StatusBadRequest, "le nom saisi ne correspond pas à la version")
 		return
 	}
 	store := a.Store.Get()
@@ -348,6 +366,42 @@ func (a *API) handleDeleteVersion(w http.ResponseWriter, r *http.Request, id, na
 	}
 	_ = models.AddEvent(a.DB, &id, models.EventLevelInfo,
 		fmt.Sprintf("Ancienne version %q supprimée depuis le panneau.", name))
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
+// handleDeleteCurrent wipes a machine's live mirror - its up-to-date
+// backup - on explicit operator request. Unlike handleDeleteVersion, this
+// does touch the current backup, on purpose: the operator wants a clean
+// slate (a live copy suspected corrupted or infected, say) without losing
+// the historical versions already kept in _anciennes_versions, which this
+// never touches.
+//
+// Guarded the same way as decommissioning a device (see
+// handleDecommissionDevice): retyping the exact device name. This is the
+// most destructive single action this panel offers short of deleting the
+// device outright, so it gets the same defense in depth.
+func (a *API) handleDeleteCurrent(w http.ResponseWriter, r *http.Request, id string) {
+	device, err := models.GetDevice(a.DB, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "appareil introuvable")
+		return
+	}
+	var req deleteFilesRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "requête invalide")
+		return
+	}
+	if strings.TrimSpace(req.ConfirmName) != device.Name {
+		writeError(w, http.StatusBadRequest, "le nom saisi ne correspond pas à celui de l'appareil")
+		return
+	}
+	store := a.Store.Get()
+	if err := store.RemoveCurrent(store.DeviceDir(device.ID, device.Name)); err != nil {
+		writeError(w, http.StatusInternalServerError, "erreur serveur")
+		return
+	}
+	_ = models.AddEvent(a.DB, &id, models.EventLevelWarning,
+		"Sauvegarde actuelle supprimée depuis le panneau : la prochaine sauvegarde repartira de zéro pour cet appareil.")
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 

@@ -719,3 +719,65 @@ func TestUsedBytesIsCachedBetweenCalls(t *testing.T) {
 		t.Fatalf("après expiration du cache = %d, attendu %d", third, want)
 	}
 }
+
+// RemoveCurrent wipes the live mirror on operator request - the "start
+// this machine's backup clean" button - while leaving previous versions
+// alone: those remain a real fallback even after the operator deletes
+// the current one.
+func TestRemoveCurrentWipesTheLiveMirrorButKeepsVersions(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+	confirm(t, s, dir, "snap1", "Bureau/rapport.docx", "contenu", ns(1700000000))
+	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+		t.Fatal(err)
+	}
+	confirm(t, s, dir, "snap2", "Bureau/rapport.docx", "contenu modifie", ns(1700003600))
+
+	if err := s.RemoveCurrent(dir); err != nil {
+		t.Fatalf("RemoveCurrent: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "Bureau", "rapport.docx")); !os.IsNotExist(err) {
+		t.Fatal("le fichier de la sauvegarde actuelle existe encore")
+	}
+	if len(s.ListVersions(dir)) != 1 {
+		t.Fatal("les versions précédentes ont été touchées par la suppression de la sauvegarde actuelle")
+	}
+	if got := read(t, filepath.Join(dir, VersionsDirName, s.ListVersions(dir)[0], "Bureau", "rapport.docx")); got != "contenu" {
+		t.Fatalf("contenu de la version précédente = %q, ne devait pas bouger", got)
+	}
+}
+
+// The critical correctness property: deleting the live files without
+// clearing the index would leave the index claiming the NAS still holds
+// them. The next backup's comparison goes by the index (see
+// NeededFiles), so a stale entry here would make it skip re-uploading
+// exactly what was just deleted - the backup would look successful while
+// silently missing files.
+func TestRemoveCurrentClearsTheIndexSoTheNextBackupResendsEverything(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+	confirm(t, s, dir, "snap1", "Bureau/rapport.docx", "contenu", ns(1700000000))
+
+	if err := s.RemoveCurrent(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	needed := s.NeededFiles(dir, []FileInfo{
+		{Path: "Bureau/rapport.docx", Size: int64(len("contenu")), ModTime: ns(1700000000)},
+	}, lastBackup)
+	if len(needed) != 1 {
+		t.Fatal("le fichier supprimé n'est pas redemandé : l'index a survécu à la suppression de la sauvegarde actuelle")
+	}
+}
+
+// RemoveCurrent on a device that has never backed up at all must be a
+// harmless no-op, not an error - the panel can offer the button without
+// first checking whether anything exists yet.
+func TestRemoveCurrentOnAnUnbackedUpDeviceIsANoOp(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC-Jamais-Sauvegarde")
+	if err := s.RemoveCurrent(dir); err != nil {
+		t.Fatalf("RemoveCurrent sur un appareil jamais sauvegardé: %v", err)
+	}
+}
