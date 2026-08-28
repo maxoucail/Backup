@@ -24,7 +24,13 @@ func (a *API) RegisterPanel(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/me", a.requireSession(a.handleMe))
 	mux.HandleFunc("POST /api/account/credentials", a.requireSession(a.handleChangeCredentials))
 
-	mux.HandleFunc("GET /api/dashboard", a.requireSession(a.handleDashboard))
+	// Split into one endpoint per dashboard section rather than a single
+	// combined one - see the doc comment on handleDashboardDevices in
+	// dashboard.go for why: one slow section must never hold up the rest
+	// of the page.
+	mux.HandleFunc("GET /api/dashboard/devices", a.requireSession(a.handleDashboardDevices))
+	mux.HandleFunc("GET /api/dashboard/storage", a.requireSession(a.handleDashboardStorage))
+	mux.HandleFunc("GET /api/dashboard/backups-per-day", a.requireSession(a.handleDashboardBackupsPerDay))
 	mux.HandleFunc("GET /api/events", a.requireSession(a.handleListEvents))
 
 	mux.HandleFunc("GET /api/devices", a.requireSession(a.handleListDevices))
