@@ -27,12 +27,12 @@ type deviceView struct {
 
 func (a *API) toDeviceView(d models.Device) deviceView {
 	latest, _ := models.LatestSnapshotForDevice(a.DB, d.ID)
-	snaps, _ := models.ListSuccessfulSnapshotsForDevice(a.DB, d.ID)
+	count, _ := models.CountSuccessfulSnapshotsForDevice(a.DB, d.ID)
 	return deviceView{
 		Device:         d,
 		Online:         a.Hub.IsOnline(d.ID),
 		LatestSnapshot: latest,
-		SnapshotCount:  len(snaps),
+		SnapshotCount:  count,
 		StorageDir:     a.Store.Get().DeviceDir(d.ID, d.Name),
 	}
 }

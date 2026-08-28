@@ -675,3 +675,47 @@ func TestSavePendingUpdatesWorksBeforeTheDeviceFolderExists(t *testing.T) {
 		t.Fatal("le fichier du tout premier backup n'a pas été confirmé dans l'index")
 	}
 }
+
+// The dashboard polls this every few seconds; without a cache, that's a
+// full recursive walk of every device's entire folder - versions included
+// - on every single poll. A second call right after the first must not
+// re-walk the disk: it must see the file that was added in between,
+// exactly as if a real walk had happened, but from the cache.
+func TestUsedBytesIsCachedBetweenCalls(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+	put(t, s, dir, "Bureau/a.txt", "1234567", ns(1700000000))
+
+	first, err := s.UsedBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != 7 {
+		t.Fatalf("premier appel = %d, attendu 7", first)
+	}
+
+	// A file added right after must not show up yet: proof the second
+	// call actually came from the cache rather than re-walking.
+	put(t, s, dir, "Bureau/b.txt", "un fichier de plus", ns(1700000000))
+	second, err := s.UsedBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("deuxième appel = %d, attendu %d (valeur en cache) : chaque appel refait le tour du disque", second, first)
+	}
+
+	// Once the cache is forced stale, the real, current total must come
+	// back - the cache must never get stuck serving an old value forever.
+	s.usedBytesMu.Lock()
+	s.usedBytesCachedAt = time.Now().Add(-usedBytesCacheTTL - time.Second)
+	s.usedBytesMu.Unlock()
+
+	third, err := s.UsedBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(7 + len("un fichier de plus")); third != want {
+		t.Fatalf("après expiration du cache = %d, attendu %d", third, want)
+	}
+}

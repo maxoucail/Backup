@@ -64,23 +64,18 @@ func ListSnapshotsForDevice(db *sql.DB, deviceID string, limit int) ([]Snapshot,
 	return out, rows.Err()
 }
 
-// ListSuccessfulSnapshotsForDevice returns completed snapshots oldest-first,
-// used by the retention rotator to decide what to delete.
-func ListSuccessfulSnapshotsForDevice(db *sql.DB, deviceID string) ([]Snapshot, error) {
-	rows, err := db.Query(`SELECT `+snapshotCols+` FROM snapshots WHERE device_id = ? AND status = 'success' ORDER BY started_at ASC`, deviceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Snapshot
-	for rows.Next() {
-		s, err := scanSnapshot(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *s)
-	}
-	return out, rows.Err()
+// CountSuccessfulSnapshotsForDevice is how many successful backups a
+// device has behind it, shown on the devices list and dashboard.
+//
+// A plain COUNT rather than fetching every row and taking len() of the
+// slice: those handlers call this once per device on every load, and
+// pulling every column of every historical snapshot just to discard it
+// and keep a number was real, needless work on any device with more than
+// a handful of runs behind it.
+func CountSuccessfulSnapshotsForDevice(db *sql.DB, deviceID string) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM snapshots WHERE device_id = ? AND status = 'success'`, deviceID).Scan(&n)
+	return n, err
 }
 
 func UpdateSnapshotProgress(db *sql.DB, id string, fileCount int, logicalBytes, uploadedBytes int64, percent float64) error {
