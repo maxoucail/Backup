@@ -137,7 +137,18 @@ func (a *API) handleAgentPlan(w http.ResponseWriter, r *http.Request, deviceID, 
 		log.Printf("sauvegarde %s: %d fichier(s) retiré(s) du miroir (absents de la machine)", device.Name, removed)
 	}
 
-	needed := store.NeededFiles(deviceDir, req.Files)
+	// Anything modified at or after the last successful backup began is
+	// re-sent unconditionally: it may have changed after that backup read
+	// it, and a one-second modification time can't prove it didn't. See
+	// filestore.NeededFiles. A failure here must not silently degrade into
+	// "skip everything unchanged" - fall back to the zero time, which only
+	// costs the extra safety, never correctness of the comparison itself.
+	lastBackupStart, err := models.LastSuccessfulSnapshotStart(a.DB, deviceID)
+	if err != nil {
+		log.Printf("plan: date de la dernière sauvegarde réussie de %s: %v", device.Name, err)
+		lastBackupStart = time.Time{}
+	}
+	needed := store.NeededFiles(deviceDir, req.Files, lastBackupStart)
 
 	var logicalBytes int64
 	for _, f := range req.Files {

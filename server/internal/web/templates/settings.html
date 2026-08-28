@@ -157,7 +157,10 @@ document.getElementById("test-storage-btn").addEventListener("click", async () =
 	resultEl.innerHTML = `<span class="badge running"><span class="dot"></span>Test en cours (6 s)…</span>`;
 	try {
 		const res = await api("POST", "/api/settings/test-storage", { path });
-		if (res.ok) {
+		if (res.ok && res.warning) {
+			resultEl.innerHTML = `<span class="badge cancelled"><span class="dot"></span>Fonctionnel, avec une réserve</span>
+				<div class="muted" style="margin-top:6px;">${res.warning}</div>`;
+		} else if (res.ok) {
 			resultEl.innerHTML = `<span class="badge success"><span class="dot"></span>Fonctionnel</span>`;
 		} else {
 			resultEl.innerHTML = `<span class="badge failed"><span class="dot"></span>Échec : ${res.error}</span>`;

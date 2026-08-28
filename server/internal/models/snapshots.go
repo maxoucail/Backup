@@ -95,6 +95,27 @@ func FinishSnapshot(db *sql.DB, id, status, errMsg string) error {
 	return err
 }
 
+// LastSuccessfulSnapshotStart returns when this device's most recent
+// successful backup began, or the zero time if it has never had one.
+//
+// Used as the cutoff for "this file may have changed after we read it"
+// (see filestore.NeededFiles). The *start* is deliberate, not the finish:
+// a file could have been modified at any point between the backup starting
+// and that file being read, so anything from the start onwards is suspect.
+func LastSuccessfulSnapshotStart(db *sql.DB, deviceID string) (time.Time, error) {
+	var started string
+	err := db.QueryRow(
+		`SELECT started_at FROM snapshots WHERE device_id = ? AND status = 'success'
+		 ORDER BY started_at DESC LIMIT 1`, deviceID).Scan(&started)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return fromDB(started), nil
+}
+
 func DeleteSnapshot(db *sql.DB, id string) error {
 	_, err := db.Exec(`DELETE FROM snapshots WHERE id = ?`, id)
 	return err

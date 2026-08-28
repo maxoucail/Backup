@@ -102,10 +102,44 @@ Le cycle d'une sauvegarde tient en quatre appels :
 « Identique » = même taille et même date de modification. C'est ce que
 font tous les outils incrémentaux : lire et hacher chaque fichier des deux
 côtés à chaque passage coûterait bien plus cher que ce que ça économise.
+N'importe quel écart compte comme une modification - plus gros, plus
+petit, plus récent **ou plus ancien** (un fichier remis en place depuis
+une vieille copie).
+
 La date de modification stockée sur le NAS est celle du fichier au moment
 de l'envoi (relue à l'ouverture, pas celle du scan) - sinon la comparaison
 du run suivant porterait sur un état que le serveur ne détient pas, et le
 fichier repartirait indéfiniment.
+
+### L'angle mort de la seconde, et comment il est fermé
+
+Les dates de modification ont une résolution d'une seconde. À elles
+seules, elles manquent donc un cas réel : un fichier modifié à nouveau
+**pendant la seconde même où l'agent l'a lu**, en gardant la même taille.
+Taille identique, seconde identique : plus rien ne paraîtra jamais
+différent, et la copie sur le NAS resterait périmée indéfiniment. C'est
+une perte de données silencieuse - la seule défaillance qu'une sauvegarde
+ne peut pas se permettre.
+
+D'où la règle complémentaire : **tout fichier dont la date de modification
+est postérieure ou égale au démarrage de la dernière sauvegarde réussie
+est renvoyé sans condition**. Il a pu changer après avoir été lu, et on ne
+peut pas prouver le contraire. Le coût est d'un transfert supplémentaire
+pour la poignée de fichiers touchés au moment d'une sauvegarde, et la
+règle s'éteint d'elle-même : au passage suivant, la date de la dernière
+sauvegarde réussie les a dépassés et ils redeviennent ignorés.
+
+### Ce dont tout cela dépend : que le NAS conserve les dates
+
+Tout l'incrémental repose sur un point : le stockage doit rendre la date
+de modification qu'on lui a demandé d'écrire. Un montage qui l'arrondit ou
+la perd (certains partages SMB/CIFS, tout ce qui est adossé à du FAT) fait
+paraître chaque fichier modifié à chaque passage - la machine retransfère
+tout son disque à chaque sauvegarde, sans rien dans les journaux qui
+l'explique. Le test de stockage (**Paramètres → Tester**) écrit donc une
+date connue sur son fichier témoin et la relit : si elle n'a pas survécu,
+il le signale comme une réserve explicite plutôt que de laisser
+l'opérateur le découvrir sur sa facture de bande passante.
 
 L'endpoint `plan` est volontairement **sans état entre les appels** : tout
 ce qu'il sait, il le lit sur le disque du NAS. Un serveur redémarré en

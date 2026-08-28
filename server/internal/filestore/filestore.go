@@ -331,9 +331,34 @@ func copyFile(src, dst string) error {
 //
 // "Identical" means same size and same modification time, which is what
 // every incremental backup tool uses: reading and hashing every file on
-// both sides each run would cost far more than it saves.
-func (s *Store) NeededFiles(deviceDir string, files []FileInfo) []string {
+// both sides each run would cost far more than it saves. Any difference in
+// either - bigger, smaller, newer, *or older* (a file restored from an old
+// copy) - counts as a change.
+//
+// # The same-second blind spot, and why lastBackupStart closes it
+//
+// Modification times have one-second resolution here, so on their own they
+// miss one real case: a file modified again during the very second the
+// agent read it, ending up with the same size and the same second. Nothing
+// would ever look different again, and that file would stay stale on the
+// NAS forever - silent data loss, which is the one failure a backup must
+// not have.
+//
+// So a file whose modification time is at or after the start of the last
+// successful backup is always re-sent: it may have changed after we read
+// it, and we cannot prove otherwise. This costs one extra transfer for the
+// handful of files touched around backup time, and it is self-limiting -
+// on the run after that, lastBackupStart has moved past them and they go
+// back to being skipped.
+//
+// A zero lastBackupStart (no successful backup yet) disables that rule;
+// the size/time comparison alone still applies.
+func (s *Store) NeededFiles(deviceDir string, files []FileInfo, lastBackupStart time.Time) []string {
 	needed := make([]string, 0, len(files))
+	unstableFrom := int64(0)
+	if !lastBackupStart.IsZero() {
+		unstableFrom = lastBackupStart.Unix()
+	}
 	for _, f := range files {
 		rel, err := RelPath(f.Path)
 		if err != nil {
@@ -341,6 +366,10 @@ func (s *Store) NeededFiles(deviceDir string, files []FileInfo) []string {
 		}
 		info, err := os.Stat(filepath.Join(deviceDir, rel))
 		if err != nil || info.Size() != f.Size || info.ModTime().Unix() != f.ModTime {
+			needed = append(needed, f.Path)
+			continue
+		}
+		if unstableFrom != 0 && f.ModTime >= unstableFrom {
 			needed = append(needed, f.Path)
 		}
 	}

@@ -66,6 +66,12 @@ func TestFilesAreStoredInClearAtTheirRealPath(t *testing.T) {
 	}
 }
 
+// lastBackup stands in for "a backup has since run and settled": it is
+// later than every file time used below, so the recently-modified safety
+// rule doesn't fire and these tests exercise the size/time comparison on
+// its own.
+var lastBackup = time.Unix(1700001000, 0)
+
 // Incremental transfer: a file the server already holds, unchanged, must
 // not be asked for again. Without this a machine re-sends its whole disk
 // on every run.
@@ -80,12 +86,110 @@ func TestNeededFilesAsksOnlyForWhatChanged(t *testing.T) {
 		{Path: "Bureau/stable.txt", Size: int64(len("inchangé")), ModTime: 1700000000},
 		{Path: "Bureau/modifie.txt", Size: 42, ModTime: 1700000500}, // touched since
 		{Path: "Bureau/nouveau.txt", Size: 10, ModTime: 1700000500}, // never seen
-	})
+	}, lastBackup)
 	sort.Strings(needed)
 
 	want := []string{"Bureau/modifie.txt", "Bureau/nouveau.txt"}
 	if len(needed) != len(want) || needed[0] != want[0] || needed[1] != want[1] {
 		t.Fatalf("fichiers demandés = %v, attendu %v", needed, want)
+	}
+}
+
+// A file already on the NAS that gets edited must come back on the next
+// backup - whatever form the edit took. Every one of these is a real way a
+// file changes on a live machine, and missing any of them means the copy
+// on the NAS silently stops matching the PC.
+func TestEveryKindOfModificationIsSentAgain(t *testing.T) {
+	cases := []struct {
+		name        string
+		before      string
+		after       string
+		modTimeThen int64
+		modTimeNow  int64
+	}{
+		{"contenu plus long", "v1", "version 2, plus longue", 1700000000, 1700000900},
+		{"contenu plus court", "version 1, longue", "v2", 1700000000, 1700000900},
+		{"même taille, contenu différent", "aaaa", "bbbb", 1700000000, 1700000900},
+		{"même taille, date inchangée mais taille... non: taille différente, date inchangée",
+			"v1", "version 2, plus longue", 1700000000, 1700000000},
+		{"date antérieure (fichier remis depuis une vieille copie)", "aaaa", "bbbb", 1700000900, 1700000000},
+		{"fichier vidé", "du contenu", "", 1700000000, 1700000900},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			dir := s.DeviceDir("dev1", "PC")
+			put(t, s, dir, "Bureau/f.txt", tc.before, tc.modTimeThen)
+
+			needed := s.NeededFiles(dir, []FileInfo{
+				{Path: "Bureau/f.txt", Size: int64(len(tc.after)), ModTime: tc.modTimeNow},
+			}, lastBackup)
+
+			if len(needed) != 1 {
+				t.Fatalf("le fichier modifié n'est pas redemandé (needed=%v) : la copie sur le NAS resterait périmée", needed)
+			}
+
+			// ...and once re-sent, the NAS really holds the new content.
+			put(t, s, dir, "Bureau/f.txt", tc.after, tc.modTimeNow)
+			if got := read(t, filepath.Join(dir, "Bureau", "f.txt")); got != tc.after {
+				t.Fatalf("contenu sur le NAS = %q, attendu %q", got, tc.after)
+			}
+			if again := s.NeededFiles(dir, []FileInfo{
+				{Path: "Bureau/f.txt", Size: int64(len(tc.after)), ModTime: tc.modTimeNow},
+			}, lastBackup); len(again) != 0 {
+				t.Fatalf("le fichier est redemandé alors qu'il vient d'être envoyé: %v", again)
+			}
+		})
+	}
+}
+
+// The blind spot of any size+date comparison: a file modified again during
+// the very second the agent read it keeps the same size and the same
+// second, so nothing ever looks different and the NAS copy stays stale
+// forever. Silent data loss - the one failure a backup must not have.
+//
+// The guard is that anything modified at or after the last successful
+// backup started is re-sent unconditionally.
+func TestFileModifiedWithinTheSameSecondIsStillSentAgain(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+
+	backupStart := time.Unix(1700000000, 0)
+	// Read and stored during that backup...
+	readAt := int64(1700000005)
+	put(t, s, dir, "Bureau/notes.txt", "texte original", readAt)
+
+	// ...and saved again in the same second, same length. Identical size,
+	// identical second: invisible to the comparison on its own.
+	announced := []FileInfo{{Path: "Bureau/notes.txt", Size: int64(len("texte MODIFIE!")), ModTime: readAt}}
+
+	if needed := s.NeededFiles(dir, announced, backupStart); len(needed) != 1 {
+		t.Fatal("un fichier modifié dans la même seconde que sa lecture n'est jamais renvoyé : il resterait périmé indéfiniment sur le NAS")
+	}
+
+	// The rule must not turn into "re-send everything forever": once a
+	// later backup has been through, the file goes back to being skipped.
+	put(t, s, dir, "Bureau/notes.txt", "texte MODIFIE!", readAt)
+	laterBackup := time.Unix(1700003600, 0)
+	if needed := s.NeededFiles(dir, announced, laterBackup); len(needed) != 0 {
+		t.Fatalf("fichier renvoyé indéfiniment (%v) : chaque sauvegarde retransférerait tout", needed)
+	}
+}
+
+// A machine that has never had a successful backup has no cutoff to
+// compare against; the size/date comparison must still work rather than
+// treating everything as suspect or as fine.
+func TestNoPreviousBackupStillComparesNormally(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+	put(t, s, dir, "Bureau/f.txt", "contenu", 1700000000)
+
+	needed := s.NeededFiles(dir, []FileInfo{
+		{Path: "Bureau/f.txt", Size: 7, ModTime: 1700000000},
+		{Path: "Bureau/autre.txt", Size: 3, ModTime: 1700000000},
+	}, time.Time{})
+	if len(needed) != 1 || needed[0] != "Bureau/autre.txt" {
+		t.Fatalf("fichiers demandés = %v, attendu le seul fichier absent", needed)
 	}
 }
 

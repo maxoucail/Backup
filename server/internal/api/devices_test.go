@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -178,4 +179,36 @@ func waitGone(t *testing.T, dir string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("le dossier %s n'a pas été supprimé", dir)
+}
+
+// The incremental backup rests entirely on the storage giving back the
+// modification time it was told to store. A share that rounds or drops it
+// makes every file look modified on every run, so the machine re-uploads
+// its whole disk each time - the storage test has to say so rather than
+// let an operator find out from their bandwidth.
+func TestStorageTestReportsWhetherModificationTimesSurvive(t *testing.T) {
+	a, _ := testAPI(t)
+	dir := t.TempDir()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/settings/test-storage",
+		strings.NewReader(`{"path":`+strconv.Quote(dir)+`}`))
+	w := httptest.NewRecorder()
+	a.handleTestStorage(w, r)
+
+	var res struct {
+		OK      bool   `json:"ok"`
+		Warning string `json:"warning"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("réponse illisible: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("le test a échoué sur un dossier local sain: %s", res.Error)
+	}
+	// A local temp dir preserves timestamps, so there must be no warning -
+	// which also proves the check runs and isn't warning unconditionally.
+	if res.Warning != "" {
+		t.Fatalf("réserve inattendue sur un disque local: %s", res.Warning)
+	}
 }

@@ -115,10 +115,34 @@ func (a *API) handleTestStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The whole incremental scheme rests on this storage giving back the
+	// modification time it was told to store: that's how the server knows
+	// a file hasn't changed. A mount that rounds or drops it makes every
+	// file look different on every run - the machine re-uploads its entire
+	// disk each time, forever, with nothing in the logs to say why. Some
+	// SMB/CIFS and FAT-backed shares do exactly that, so it is checked
+	// here rather than discovered from a monthly bandwidth bill.
+	timestampWarning := ""
+	stamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(marker, stamp, stamp); err != nil {
+		timestampWarning = "impossible d'écrire la date de modification des fichiers (" + err.Error() + ")"
+	} else if info, err := os.Stat(marker); err != nil {
+		timestampWarning = "impossible de relire la date de modification des fichiers (" + err.Error() + ")"
+	} else if !info.ModTime().UTC().Equal(stamp) {
+		timestampWarning = fmt.Sprintf(
+			"ce stockage ne conserve pas exactement la date de modification des fichiers (écrit %s, relu %s). "+
+				"Les sauvegardes fonctionneront, mais chaque fichier sera considéré comme modifié à chaque passage : "+
+				"tout sera retransféré à chaque sauvegarde.",
+			stamp.Format(time.RFC3339), info.ModTime().UTC().Format(time.RFC3339))
+	}
+
 	if err := os.Remove(marker); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "échec de la suppression du fichier de test: " + err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// Reported as a warning, not a failure: the path genuinely works, and
+	// refusing it would leave the operator with no storage at all over
+	// something that costs bandwidth rather than data.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warning": timestampWarning})
 }
