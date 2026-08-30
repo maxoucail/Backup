@@ -29,7 +29,13 @@ import (
 // device backing up doesn't monopolize the server or the agent's own
 // upstream bandwidth - multiple devices backing up at the same time each
 // get their own such budget, handled independently by the server.
-const uploadConcurrency = 4
+//
+// Set higher than a single fast connection would need on its own: most of
+// a real backup's file count is small files (documents, photos), where
+// per-request round-trip latency - not link bandwidth - is what actually
+// caps throughput. Several uploads in flight at once hides that latency
+// behind each other instead of paying it serially file after file.
+const uploadConcurrency = 8
 
 type Progress struct {
 	Phase string // scanning / planning / uploading / finalizing
@@ -41,6 +47,9 @@ type Progress struct {
 	UploadedBytes int64
 	Percent       float64
 	EtaSeconds    int64
+	// BytesPerSec is the same rolling-window measurement EtaSeconds is
+	// derived from - see etaCheckpoint.
+	BytesPerSec float64
 }
 
 // etaWindow bounds how far back an etaCheckpoint looks to estimate the
@@ -58,24 +67,30 @@ const etaWindow = 3 * time.Second
 // the caller (Run's upload loop) already serializes access to it under
 // uploadedMu alongside the byte counter it derives its rate from.
 type etaCheckpoint struct {
-	at      time.Time
-	bytes   int64
-	lastETA int64
+	at       time.Time
+	bytes    int64
+	lastETA  int64
+	lastRate float64 // bytes/sec, from the same window as lastETA
 }
 
 // update folds in a new (done, total) sample taken at now, rolling the
-// checkpoint forward and recomputing the ETA once at least etaWindow has
-// passed since the last one - otherwise it returns the ETA from the last
-// completed window, so the display doesn't reset to nothing between
-// windows or jitter on every single small file.
-func (c *etaCheckpoint) update(now time.Time, done, total int64) int64 {
+// checkpoint forward and recomputing the ETA and current rate once at
+// least etaWindow has passed since the last one - otherwise it returns the
+// values from the last completed window, so the display doesn't reset to
+// nothing between windows or jitter on every single small file.
+func (c *etaCheckpoint) update(now time.Time, done, total int64) (etaSeconds int64, bytesPerSec float64) {
 	if since := now.Sub(c.at); since >= etaWindow {
-		if rate := float64(done-c.bytes) / since.Seconds(); rate > 0 && done < total {
-			c.lastETA = int64(float64(total-done) / rate)
+		if rate := float64(done-c.bytes) / since.Seconds(); rate > 0 {
+			c.lastRate = rate
+			if done < total {
+				c.lastETA = int64(float64(total-done) / rate)
+			} else {
+				c.lastETA = 0
+			}
 		}
 		c.at, c.bytes = now, done
 	}
-	return c.lastETA
+	return c.lastETA, c.lastRate
 }
 
 type ProgressFunc func(Progress)
@@ -188,7 +203,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []scanner.Roo
 				uploadedMu.Lock()
 				uploadedBytes += n
 				done := uploadedBytes
-				eta := checkpoint.update(time.Now(), done, totalToUpload)
+				eta, rate := checkpoint.update(time.Now(), done, totalToUpload)
 				uploadedMu.Unlock()
 
 				pct := 100.0
@@ -200,7 +215,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []scanner.Roo
 				}
 				onProgress(Progress{
 					Phase: "uploading", SnapshotID: snapshotID, FileCount: len(files), LogicalBytes: logicalBytes,
-					UploadedBytes: done, Percent: pct, EtaSeconds: eta,
+					UploadedBytes: done, Percent: pct, EtaSeconds: eta, BytesPerSec: rate,
 				})
 			}
 		}()

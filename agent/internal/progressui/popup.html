@@ -30,6 +30,7 @@
 	<div class="bar"><div id="bar-fill"></div></div>
 	<div class="row">
 		<span id="detail"></span>
+		<span id="speed"></span>
 		<span id="eta"></span>
 	</div>
 	<div class="footer">&copy; Dallaverde &mdash; Backup Agent</div>
@@ -61,6 +62,10 @@ function fmtBytes(b) {
 	while (v>=1024 && i<u.length-1) { v/=1024; i++; }
 	return v.toFixed(i===0?0:1)+" "+u[i];
 }
+function fmtSpeed(bytesPerSec) {
+	if (!bytesPerSec || bytesPerSec <= 0) return "";
+	return fmtBytes(bytesPerSec) + "/s";
+}
 
 async function poll() {
 	try {
@@ -73,12 +78,14 @@ async function poll() {
 			document.getElementById("pct").textContent = fmtCountdown(remaining);
 			document.getElementById("bar-fill").style.width = "0%";
 			document.getElementById("eta").textContent = "";
+			document.getElementById("speed").textContent = "";
 			document.getElementById("detail").textContent = "Démarrage automatique de la sauvegarde";
 		} else {
 			document.getElementById("phase").textContent = phaseLabels[s.phase] || s.phase;
 			document.getElementById("pct").textContent = Math.round(s.percent) + "%";
 			document.getElementById("bar-fill").style.width = s.percent + "%";
 			document.getElementById("eta").textContent = fmtEta(s.eta_seconds);
+			document.getElementById("speed").textContent = fmtSpeed(s.bytes_per_sec);
 			document.getElementById("detail").textContent = s.detail_bytes ? fmtBytes(s.detail_bytes) : "";
 		}
 		const dot = document.getElementById("dot");

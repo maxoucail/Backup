@@ -432,27 +432,52 @@ accepte déjà des chemins absolus arbitraires) : par défaut l'agent trouve
 tout seul le bon disque, et l'opérateur peut toujours forcer des chemins
 précis par appareil si besoin.
 
-## Icône de la barre des tâches (Windows)
+## Icône de la barre des tâches / barre de menu (Windows et macOS)
 
 Le service expose une API de contrôle minimaliste en local
-(`127.0.0.1:47812`, `internal/tray` côté client) : état (date de dernière
-sauvegarde, connexion), déclenchement manuel, reprogrammation. L'icône
-elle-même (`backup-agent.exe --tray`) est un processus séparé, lancé dans
-la session console par le même mécanisme `CreateProcessAsUser` que
-l'assistant/la popup - implémenté en Win32 pur (`Shell_NotifyIconW`,
-fenêtre cachée, menu contextuel), sans CGO. Son isolement en processus à
-part garantit qu'un problème dans l'icône n'affecte jamais le service de
-sauvegarde lui-même. Une reprogrammation locale ne fait que déplacer
-l'échéance planifiée normale ; une commande du serveur (`backup_now`,
-`cancel`) est traitée indépendamment dans la boucle WebSocket principale
-et n'est donc jamais retardée par quoi que ce soit venant de l'icône -
-c'est ce qui garde le serveur prioritaire par construction, pas par une
-règle de priorité explicite à maintenir.
+(`127.0.0.1:47812`, `startTrayControlAPI` dans `cmd/backup-agent`,
+partagée par les deux plateformes) : état (date de dernière sauvegarde,
+connexion), déclenchement manuel, reprogrammation. L'icône elle-même est
+un processus séparé, lancé dans la session console par le même mécanisme
+que l'assistant/la popup (`CreateProcessAsUser` sur Windows, `launchctl
+asuser` sur macOS), qui parle à ce service exclusivement via cette API
+HTTP locale. Son isolement en processus à part garantit qu'un problème
+dans l'icône n'affecte jamais le service de sauvegarde lui-même. Une
+reprogrammation locale ne fait que déplacer l'échéance planifiée
+normale ; une commande du serveur (`backup_now`, `cancel`) est traitée
+indépendamment dans la boucle WebSocket principale et n'est donc jamais
+retardée par quoi que ce soit venant de l'icône - c'est ce qui garde le
+serveur prioritaire par construction, pas par une règle de priorité
+explicite à maintenir.
 
-**Non implémenté dans cette passe** : l'équivalent macOS (icône de barre
-de menu) nécessiterait CGO (NSStatusBar), incompatible avec la
-cross-compilation depuis Linux sans machine Mac ; à envisager comme job CI
-dédié tournant sur un runner macOS si besoin.
+- **Windows** (`internal/tray`, `backup-agent.exe --tray`) : Win32 pur
+  (`Shell_NotifyIconW`, fenêtre cachée, menu contextuel classique) via
+  `syscall`, sans CGO.
+- **macOS** (`internal/macmenubar`, `backup-agent --menubar`) : un
+  `NSStatusItem` piloté directement via le runtime Objective-C
+  (`objc_msgSend`, `objc_getClass`, `sel_registerName`, une classe créée
+  dynamiquement à l'exécution pour porter l'action des trois entrées de
+  menu cliquables) grâce à `github.com/ebitengine/purego`, qui gère les
+  conventions d'appel (registres entiers vs. flottants) sans CGO. C'est ce
+  qui permet de continuer à cross-compiler l'agent macOS depuis un
+  toolchain Go Linux ordinaire, sans SDK Xcode ni machine Mac dans la
+  chaîne de build - purego résout les frameworks (`libobjc.A.dylib`,
+  `AppKit`) au démarrage du processus, sur la machine cible, pas à la
+  compilation. La ligne "Dernière sauvegarde : ..." est rafraîchie toutes
+  les 30s depuis une goroutine à part, en dehors du thread principal
+  verrouillé par `[NSApp run]` - une simple mise à jour de propriété sur
+  un `NSMenuItem` déjà existant, sans déclenchement de rendu synchrone, ce
+  qui reste dans la pratique le raccourci standard des utilitaires Cocoa
+  minimalistes pour éviter d'avoir à faire transiter chaque rafraîchissement
+  par le thread principal.
+
+  **Statut** : implémenté et vérifié à la compilation (cross-compilation
+  `darwin/amd64` et `darwin/arm64`, `go vet` propre) depuis cet
+  environnement Linux, mais jamais exécuté sur un vrai Mac - il n'y en a
+  pas dans cette chaîne de build/CI. À valider en conditions réelles avant
+  de la considérer stable ; des ajustements sont probables au premier
+  retour terrain (voir le bug du `$HOME` non défini en mode service,
+  découvert exactement de cette façon).
 
 ## Téléchargement en libre-service et test de stockage
 

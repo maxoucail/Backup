@@ -33,6 +33,7 @@ import (
 	"backup-agent/internal/config"
 	"backup-agent/internal/knownfolders"
 	"backup-agent/internal/macdaemon"
+	"backup-agent/internal/macmenubar"
 	"backup-agent/internal/osinfo"
 	"backup-agent/internal/osui"
 	"backup-agent/internal/progressui"
@@ -78,6 +79,11 @@ func main() {
 			return
 		case "--tray": // internal: the notification-area icon helper, launched by the service
 			_ = tray.Run(trayControlBaseURL)
+			return
+		case "--menubar": // internal: the macOS menu bar icon helper, launched by the LaunchDaemon
+			if err := macmenubar.Run(trayControlBaseURL); err != nil {
+				log.Printf("barre de menu: %v", err)
+			}
 			return
 		case "install":
 			if err := installSelf(); err != nil {
@@ -184,6 +190,7 @@ func runServiceMode(ctx context.Context) {
 		osui.ShowURL = func(url string) error {
 			return macdaemon.LaunchInConsoleSession(exePath, []string{"--show-url", url})
 		}
+		go ensureMenuBarHelperRunning(ctx, exePath)
 	}
 
 	log.Printf("backup-agent %s démarré en service système", AgentVersion)
@@ -210,6 +217,27 @@ func ensureTrayHelperRunning(ctx context.Context, exePath string) {
 			continue
 		}
 		log.Print("icône de la barre des tâches lancée dans la session utilisateur")
+		return
+	}
+}
+
+// ensureMenuBarHelperRunning is ensureTrayHelperRunning's macOS
+// counterpart: launches the menu bar icon into the console user's
+// session, retrying with backoff since nobody may be logged in yet right
+// after boot.
+func ensureMenuBarHelperRunning(ctx context.Context, exePath string) {
+	delay := 5 * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if err := macdaemon.LaunchInConsoleSession(exePath, []string{"--menubar"}); err != nil {
+			delay = 30 * time.Second
+			continue
+		}
+		log.Print("icône de la barre de menu lancée dans la session utilisateur")
 		return
 	}
 }
@@ -493,7 +521,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 
 		result, err := backupjob.Run(jobCtx, api, kind, roots, func(p backupjob.Progress) {
 			if popup != nil {
-				popup.Update(p.Phase, p.Percent, p.EtaSeconds, p.UploadedBytes)
+				popup.Update(p.Phase, p.Percent, p.EtaSeconds, p.UploadedBytes, p.BytesPerSec)
 			}
 			wsc.Send(protocol.Envelope{
 				Type: protocol.TypeProgress, SnapshotID: p.SnapshotID, Phase: p.Phase, FileCount: p.FileCount,
@@ -563,7 +591,7 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 		}
 	}
 
-	if runtime.GOOS == "windows" && svcmode.IsWindowsService() {
+	if (runtime.GOOS == "windows" && svcmode.IsWindowsService()) || (runtime.GOOS == "darwin" && macdaemon.IsRoot()) {
 		startTrayControlAPI(agentCtx, cfg, mutateCfg, wsc, runBackup, readLastBackup)
 	}
 

@@ -27,6 +27,7 @@ type State struct {
 	Phase           string  `json:"phase"`
 	Percent         float64 `json:"percent"`
 	EtaSeconds      int64   `json:"eta_seconds"`
+	BytesPerSec     float64 `json:"bytes_per_sec"`
 	DetailBytes     int64   `json:"detail_bytes"`
 	ScheduledAtUnix int64   `json:"scheduled_at_unix,omitempty"`
 	Done            bool    `json:"done"`
@@ -73,11 +74,12 @@ func Show(title string) (*Popup, error) {
 	return p, nil
 }
 
-func (p *Popup) Update(phase string, percent float64, etaSeconds, detailBytes int64) {
+func (p *Popup) Update(phase string, percent float64, etaSeconds, detailBytes int64, bytesPerSec float64) {
 	p.mu.Lock()
 	p.state.Phase = phase
 	p.state.Percent = percent
 	p.state.EtaSeconds = etaSeconds
+	p.state.BytesPerSec = bytesPerSec
 	p.state.DetailBytes = detailBytes
 	p.state.ScheduledAtUnix = 0
 	p.mu.Unlock()
