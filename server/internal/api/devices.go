@@ -339,7 +339,7 @@ func (a *API) handleListVersions(w http.ResponseWriter, r *http.Request, id stri
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"storage_dir":     deviceDir,
-		"used_bytes":      store.DeviceUsedBytes(deviceDir),
+		"used_bytes":      store.CurrentUsedBytes(deviceDir),
 		"versions":        versions,
 		"versions_folder": filestore.VersionsDirName,
 	})

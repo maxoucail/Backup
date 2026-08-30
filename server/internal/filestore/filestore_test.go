@@ -733,6 +733,56 @@ func TestRemoveCurrentWipesTheLiveMirrorButKeepsVersions(t *testing.T) {
 	}
 }
 
+// This is the exact bug an operator hit: deleting the current backup
+// while an old version still exists must make the panel's "Actuelle" row
+// reflect that nothing current is left. DeviceUsedBytes walks the whole
+// device folder including VersionsDirName, so after RemoveCurrent it kept
+// reporting the old version's leftover bytes as if they were still part
+// of the live mirror - the row stayed on screen showing a shrunken but
+// nonzero size instead of disappearing, looking like the delete had only
+// partly worked. CurrentUsedBytes must report zero once the live mirror
+// is actually empty, regardless of what preserved versions still hold.
+func TestCurrentUsedBytesExcludesPreservedVersions(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+	confirm(t, s, dir, "snap1", "Bureau/rapport.docx", "contenu", ns(1700000000))
+	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+		t.Fatal(err)
+	}
+	confirm(t, s, dir, "snap2", "Bureau/rapport.docx", "contenu modifie", ns(1700003600))
+
+	// DeviceUsedBytes(dir) at this point covers both the current file and
+	// the one preserved version's own copy of the old content
+	// ("contenu", 7 bytes) - CurrentUsedBytes must be exactly that much
+	// less, i.e. it must not be counting the version's bytes at all. Not
+	// asserted as a hardcoded number: the current side also includes
+	// .backup-index.json, whose exact size shouldn't be this test's
+	// business.
+	whole := s.DeviceUsedBytes(dir)
+	before := s.CurrentUsedBytes(dir)
+	if whole-before != int64(len("contenu")) {
+		t.Fatalf("DeviceUsedBytes(%d) - CurrentUsedBytes(%d) = %d, attendu %d (les octets de la version préservée, ni plus ni moins)",
+			whole, before, whole-before, len("contenu"))
+	}
+
+	if err := s.RemoveCurrent(dir); err != nil {
+		t.Fatalf("RemoveCurrent: %v", err)
+	}
+
+	if len(s.ListVersions(dir)) != 1 {
+		t.Fatal("la version précédente aurait dû survivre à RemoveCurrent")
+	}
+	if got := s.CurrentUsedBytes(dir); got != 0 {
+		t.Fatalf("used bytes après suppression de l'actuelle = %d, attendu 0 (la version conservée ne doit pas compter)", got)
+	}
+	// DeviceUsedBytes, by contrast, is the whole-folder figure and is
+	// expected to still see the preserved version's bytes - that's the
+	// distinction this fix depends on, not a bug in DeviceUsedBytes itself.
+	if got := s.DeviceUsedBytes(dir); got != int64(len("contenu")) {
+		t.Fatalf("DeviceUsedBytes après suppression de l'actuelle = %d, attendu %d (les octets de la version conservée)", got, len("contenu"))
+	}
+}
+
 // The critical correctness property: deleting the live files without
 // clearing the index would leave the index claiming the NAS still holds
 // them. The next backup's comparison goes by the index (see

@@ -299,10 +299,19 @@ async function loadVersions() {
 		const data = await api("GET", `/api/devices/${deviceId}/versions`);
 		document.getElementById("storage-dir").textContent = data.storage_dir || "—";
 		const versions = data.versions || [];
-		const hasCurrent = data.used_bytes > 0 || versions.length > 0;
+		// Whether to show the "Actuelle" row and whether to show the
+		// empty-state message are two different questions - conflating
+		// them into one hasCurrent flag used to mean that deleting the
+		// current backup while old versions still existed left a
+		// misleading "Actuelle · 0 o" row on screen instead of the row
+		// disappearing, since old versions alone kept the combined flag
+		// true. The row itself must depend only on whether there's
+		// actually live data; the empty-state message alone cares about
+		// current-or-versions.
+		const hasCurrent = data.used_bytes > 0;
 		const rows = hasCurrent ? [currentRow(data.storage_dir, data.used_bytes)] : [];
 		document.getElementById("versions-body").innerHTML = rows.concat(versions.map(versionRow)).join("");
-		document.getElementById("versions-empty").style.display = hasCurrent ? "none" : "block";
+		document.getElementById("versions-empty").style.display = (hasCurrent || versions.length > 0) ? "none" : "block";
 	} catch (err) {
 		document.getElementById("storage-dir").textContent = "indisponible";
 	}

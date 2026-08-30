@@ -830,12 +830,54 @@ func (s *Store) FreeBytes() (int64, error) {
 	return freeBytes(s.Root)
 }
 
-// DeviceUsedBytes is UsedBytes for one machine's folder.
+// DeviceUsedBytes is UsedBytes for one machine's folder. Used both for a
+// specific previous version's own subfolder (which never itself contains
+// a nested VersionsDirName, so the whole-tree walk is exactly that
+// version's footprint) and, historically, for the device folder as a
+// whole - which does include VersionsDirName, so see CurrentUsedBytes
+// below for the one case that must not.
 func (s *Store) DeviceUsedBytes(deviceDir string) int64 {
 	var total int64
 	seen := make(map[uint64]bool)
 	_ = filepath.Walk(deviceDir, func(_ string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !info.Mode().IsRegular() {
+			return nil
+		}
+		if ino, nlink, ok := fileIdentity(info); ok && nlink > 1 {
+			if seen[ino] {
+				return nil
+			}
+			seen[ino] = true
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
+}
+
+// CurrentUsedBytes is the live mirror's own footprint - deviceDir minus
+// VersionsDirName. Deleting the current backup while old versions still
+// exist must make the panel's "Actuelle" row reflect that there's nothing
+// current left; before this, it read DeviceUsedBytes(deviceDir), which
+// walks the whole device folder including every preserved previous
+// version, so a version's leftover bytes kept that row showing a
+// nonzero size - looking like the current backup was still (partly)
+// there when it had in fact just been deleted entirely.
+func (s *Store) CurrentUsedBytes(deviceDir string) int64 {
+	var total int64
+	seen := make(map[uint64]bool)
+	versionsDir := filepath.Join(deviceDir, VersionsDirName)
+	_ = filepath.Walk(deviceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if path == versionsDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		if ino, nlink, ok := fileIdentity(info); ok && nlink > 1 {
