@@ -256,10 +256,27 @@ silencieusement le cycle.
   fichier rencontré coûte un aller-retour. Recalculé toutes les 5 minutes
   et écrit dans `settings.storage_used_bytes`/`storage_used_at` plutôt que
   calculé à la demande : `GET /api/dashboard/storage` ne fait qu'une
-  lecture de ces deux colonnes, jamais un parcours du NAS sur le chemin de
-  la requête. Un calcul a aussi lieu une fois au démarrage du serveur,
-  avant d'entrer dans la boucle des tickers, pour qu'un redémarrage
-  (chaque déploiement en fait un) n'affiche pas "0 o" pendant 5 minutes.
+  lecture de ces colonnes, jamais un parcours du NAS sur le chemin de la
+  requête. Un calcul a aussi lieu une fois au démarrage du serveur, avant
+  d'entrer dans la boucle des tickers, pour qu'un redémarrage (chaque
+  déploiement en fait un) n'affiche pas "0 o" pendant 5 minutes.
+- **Espace disponible** : contrairement au stockage utilisé, ce n'est pas
+  un parcours - un seul appel `statfs()` sur le volume qui porte la racine
+  de stockage (`filestore.Store.FreeBytes`), aussi bon marché sur un
+  montage réseau qu'en local. Recalculé à chaque tick (une fois par
+  minute) et écrit dans `settings.storage_free_bytes`/`storage_free_at`,
+  lu par le même `GET /api/dashboard/storage` que le stockage utilisé.
+- **Prochaine sauvegarde (estimée)** : le tableau de bord affiche, par
+  appareil, un compte à rebours calculé côté panneau à partir de
+  `latest_snapshot.started_at` et de l'intervalle effectif de l'appareil
+  (`effective_interval_minutes` dans la réponse de
+  `GET /api/dashboard/devices` - la même résolution appareil/défaut que
+  `effectivePolicy` utilise déjà pour le point de configuration de
+  l'agent). Une estimation assumée comme telle : le vrai calendrier,
+  rattrapages et reprogrammations compris, est décidé par l'agent, dont ce
+  chiffre côté serveur ne sait rien. Aucune modification de l'agent
+  n'était nécessaire - tout se calcule à partir de données que le serveur
+  connaît déjà.
 
 ## Agent : identification et politique
 

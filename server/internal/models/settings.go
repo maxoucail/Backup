@@ -55,3 +55,29 @@ func UpdateStorageUsage(db *sql.DB, usedBytes int64) error {
 		usedBytes, toDB(time.Now()))
 	return err
 }
+
+// GetStorageFree returns the free-space figure last computed by the
+// scheduler's periodic refresh (see scheduler.refreshStorageFree), and
+// when that refresh last ran. At is the zero time before the very first
+// refresh has completed. Kept independent of Settings for the same
+// reason as GetStorageUsage: the panel's settings form has no field for
+// this, and folding it into that struct would zero it out on every
+// unrelated settings save.
+func GetStorageFree(db *sql.DB) (freeBytes int64, at time.Time, err error) {
+	var atStr sql.NullString
+	err = db.QueryRow(`SELECT storage_free_bytes, storage_free_at FROM settings WHERE id = 1`).Scan(&freeBytes, &atStr)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if atStr.Valid {
+		at = fromDB(atStr.String)
+	}
+	return freeBytes, at, nil
+}
+
+// UpdateStorageFree records a freshly computed free-space figure.
+func UpdateStorageFree(db *sql.DB, freeBytes int64) error {
+	_, err := db.Exec(`UPDATE settings SET storage_free_bytes = ?, storage_free_at = ? WHERE id = 1`,
+		freeBytes, toDB(time.Now()))
+	return err
+}

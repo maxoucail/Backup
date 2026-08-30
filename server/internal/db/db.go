@@ -44,7 +44,12 @@ CREATE TABLE IF NOT EXISTS settings (
 	-- dashboard load. storage_used_at is NULL until the first refresh
 	-- completes.
 	storage_used_bytes INTEGER NOT NULL DEFAULT 0,
-	storage_used_at DATETIME
+	storage_used_at DATETIME,
+	-- Free space on the storage volume, refreshed far more often than
+	-- storage_used_bytes above: it's a single statfs() call rather than a
+	-- walk, so there's no reason not to keep it close to current.
+	storage_free_bytes INTEGER NOT NULL DEFAULT 0,
+	storage_free_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS enrollment_keys (
@@ -143,6 +148,8 @@ func migrate(sqlDB *sql.DB) error {
 		{"settings", "static_enrollment_token", "TEXT NOT NULL DEFAULT ''"},
 		{"settings", "storage_used_bytes", "INTEGER NOT NULL DEFAULT 0"},
 		{"settings", "storage_used_at", "DATETIME"},
+		{"settings", "storage_free_bytes", "INTEGER NOT NULL DEFAULT 0"},
+		{"settings", "storage_free_at", "DATETIME"},
 	}
 	for _, c := range columns {
 		exists, err := columnExists(sqlDB, c.table, c.column)

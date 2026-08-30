@@ -44,25 +44,35 @@ func (a *API) handleDashboardDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, views)
 }
 
-// handleDashboardStorage reports total space used across the whole NAS.
+// handleDashboardStorage reports total space used and free across the
+// whole NAS.
 //
-// A plain database read, never a filesystem walk: computing this figure
+// Both are plain database reads, never live filesystem work: used space
 // means walking every device's entire folder (see filestore.UsedBytes),
-// which on a real network mount is a stat() per file over the network,
-// not a local disk operation - far too slow to redo on every dashboard
-// load. The scheduler recomputes it periodically in the background (see
-// scheduler.refreshStorageUsage) and this just serves whatever it last
-// wrote, so a request here is always fast regardless of how large or how
-// slow to reach the NAS is.
+// which on a real network mount is a stat() per file over the network -
+// far too slow to redo on every dashboard load. Free space is cheap (a
+// single statfs() - see filestore.Store.FreeBytes) but is still served
+// from the same cached figure for consistency, refreshed on its own,
+// faster cadence by the scheduler (see scheduler.refreshStorageFree vs
+// refreshStorageUsage). Either way this handler only ever reads what the
+// scheduler last wrote, so it's always fast.
 func (a *API) handleDashboardStorage(w http.ResponseWriter, r *http.Request) {
-	usedBytes, at, err := models.GetStorageUsage(a.DB)
+	usedBytes, usedAt, err := models.GetStorageUsage(a.DB)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
 	}
-	resp := map[string]any{"storage_used_bytes": usedBytes}
-	if !at.IsZero() {
-		resp["computed_at"] = at.UTC().Format(time.RFC3339)
+	freeBytes, freeAt, err := models.GetStorageFree(a.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "erreur serveur")
+		return
+	}
+	resp := map[string]any{"storage_used_bytes": usedBytes, "storage_free_bytes": freeBytes}
+	if !usedAt.IsZero() {
+		resp["used_computed_at"] = usedAt.UTC().Format(time.RFC3339)
+	}
+	if !freeAt.IsZero() {
+		resp["free_computed_at"] = freeAt.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

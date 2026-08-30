@@ -75,3 +75,30 @@ func TestGetStorageUsageBeforeAnyRefreshIsZero(t *testing.T) {
 		t.Fatalf("usedBytes=%d at=%v, attendu 0 et zero avant le premier calcul", usedBytes, at)
 	}
 }
+
+// refreshStorageFree is the cheap counterpart to refreshStorageUsage: a
+// single statfs() rather than a walk, so it runs every tick. It must
+// still round-trip through the same GetStorageFree/UpdateStorageFree pair
+// correctly.
+func TestRefreshStorageFreeRecordsWhatItComputes(t *testing.T) {
+	sqlDB, holder := testStore(t)
+
+	if _, at, err := models.GetStorageFree(sqlDB); err != nil {
+		t.Fatalf("GetStorageFree avant tout calcul: %v", err)
+	} else if !at.IsZero() {
+		t.Fatal("une date de calcul existe avant le premier calcul")
+	}
+
+	refreshStorageFree(sqlDB, holder)
+
+	freeBytes, at, err := models.GetStorageFree(sqlDB)
+	if err != nil {
+		t.Fatalf("GetStorageFree: %v", err)
+	}
+	if freeBytes <= 0 {
+		t.Fatalf("espace disponible enregistré = %d, attendu un chiffre réel (>0) pour un vrai système de fichiers", freeBytes)
+	}
+	if at.IsZero() {
+		t.Fatal("la date de calcul n'a pas été enregistrée")
+	}
+}

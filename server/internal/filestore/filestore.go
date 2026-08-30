@@ -822,6 +822,14 @@ func (s *Store) UsedBytes() (int64, error) {
 	return total, err
 }
 
+// FreeBytes reports how much space remains on the filesystem backing this
+// store's root. Unlike UsedBytes, this is a single statfs() call rather
+// than a walk - cheap enough that the scheduler refreshes it every
+// minute rather than every five (see scheduler.refreshStorageFree).
+func (s *Store) FreeBytes() (int64, error) {
+	return freeBytes(s.Root)
+}
+
 // DeviceUsedBytes is UsedBytes for one machine's folder.
 func (s *Store) DeviceUsedBytes(deviceDir string) int64 {
 	var total int64

@@ -16,7 +16,11 @@
 		<div class="grid grid-4" style="margin-bottom:16px;">
 			<div class="card"><div class="stat-label">Appareils</div><div class="stat-value" id="stat-devices">—</div></div>
 			<div class="card"><div class="stat-label">En ligne</div><div class="stat-value" id="stat-online">—</div></div>
-			<div class="card"><div class="stat-label">Stockage utilisé</div><div class="stat-value small" id="stat-storage">—</div></div>
+			<div class="card">
+				<div class="stat-label">Stockage utilisé</div>
+				<div class="stat-value small" id="stat-storage">—</div>
+				<div class="muted" style="font-size:.75rem; margin-top:4px;" id="stat-storage-free">…</div>
+			</div>
 			<div class="card"><div class="stat-label">Sauvegardes (14 j)</div><div class="stat-value" id="stat-backups">—</div></div>
 		</div>
 
@@ -37,12 +41,13 @@
 				<a class="btn small" href="/devices">Gérer les appareils →</a>
 			</div>
 			<table>
-				<thead><tr><th>Nom</th><th>Statut</th><th>OS</th><th>Dernière sauvegarde</th><th>Taille</th></tr></thead>
+				<thead><tr><th>Nom</th><th>Statut</th><th>OS</th><th>Dernière sauvegarde</th><th>Taille</th><th>Prochaine sauvegarde</th></tr></thead>
 				<tbody id="devices-table-body"></tbody>
 			</table>
 			<div id="devices-empty" class="empty-state" style="display:none;">
 				Aucun appareil enrôlé pour l'instant. Rendez-vous dans <a href="/settings">Paramètres</a> pour générer une clé d'enrôlement.
 			</div>
+			<p class="muted" style="font-size:.78rem; margin:10px 0 0 0;">« Prochaine sauvegarde » est une estimation (dernière sauvegarde + intervalle configuré) : le calendrier réel, rattrapages compris, est géré par l'agent sur le poste.</p>
 		</div>
 
 		<div class="card">
@@ -60,17 +65,53 @@
 document.getElementById("sidebar-slot").outerHTML = renderSidebar("dashboard");
 wireLogout();
 
+// formatCountdown turns a target timestamp (ms since epoch) into a short
+// human string. null means there's nothing to estimate from yet (the
+// device has never backed up); a past target means the estimate has come
+// and gone - which just as often means the agent is still working through
+// its own catch-up/retry logic as it does an actual problem, so this says
+// "en retard" rather than a more alarming word.
+function formatCountdown(nextAt) {
+	if (nextAt == null) return "—";
+	const remainingMs = nextAt - Date.now();
+	if (remainingMs <= 0) return "en retard";
+	const totalSeconds = Math.floor(remainingMs / 1000);
+	const h = Math.floor(totalSeconds / 3600);
+	const m = Math.floor((totalSeconds % 3600) / 60);
+	const s = totalSeconds % 60;
+	if (h > 0) return `${h} h ${String(m).padStart(2, "0")} min`;
+	if (m > 0) return `${m} min ${String(s).padStart(2, "0")} s`;
+	return `${s} s`;
+}
+
 function deviceRow(d) {
 	const last = d.latest_snapshot;
 	const size = last ? fmtBytes(last.logical_bytes) : "—";
 	const lastDate = last ? fmtDate(last.started_at) : "jamais";
+	// The target is stored on the cell (data-next-at) and re-read every
+	// second by tickCountdowns - see below - so the countdown actually
+	// counts down between polls instead of just jumping every 8s.
+	const nextAt = (last && d.effective_interval_minutes)
+		? new Date(last.started_at).getTime() + d.effective_interval_minutes * 60000
+		: null;
 	return `<tr class="clickable" onclick="location.href='/devices/${d.id}'">
 		<td>${d.name}</td>
 		<td><span class="badge ${d.online ? 'online' : 'offline'}"><span class="dot"></span>${d.online ? 'en ligne' : 'hors ligne'}</span></td>
 		<td class="muted">${d.os_name || '—'}</td>
 		<td>${lastDate}</td>
 		<td>${size}</td>
+		<td class="muted countdown-cell" data-next-at="${nextAt ?? ""}">${formatCountdown(nextAt)}</td>
 	</tr>`;
+}
+
+// Ticks every countdown cell once a second from its own stored target,
+// independent of loadDevices' 8-second poll - a countdown that only moved
+// every 8 seconds wouldn't look like one.
+function tickCountdowns() {
+	document.querySelectorAll("#devices-table-body .countdown-cell").forEach((td) => {
+		const raw = td.getAttribute("data-next-at");
+		td.textContent = formatCountdown(raw ? Number(raw) : null);
+	});
 }
 
 function eventRow(e) {
@@ -106,6 +147,7 @@ async function loadStorage() {
 	try {
 		const data = await api("GET", "/api/dashboard/storage");
 		document.getElementById("stat-storage").textContent = fmtBytes(data.storage_used_bytes);
+		document.getElementById("stat-storage-free").textContent = fmtBytes(data.storage_free_bytes) + " disponibles";
 	} catch (err) {
 		toast("Erreur de chargement (stockage) : " + err.message, "error");
 	}
@@ -137,10 +179,11 @@ loadStorage();
 setInterval(loadDevices, 8000);
 setInterval(loadBackupsPerDay, 8000);
 setInterval(loadEvents, 8000);
-// Polling faster than this would just re-serve the same server-side
-// cached value (see filestore.UsedBytes) - no point paying the request
-// overhead more often than the number can actually change.
-setInterval(loadStorage, 30000);
+setInterval(tickCountdowns, 1000);
+// Used space is recomputed server-side every 5 minutes (a full NAS walk),
+// free space every minute (a cheap statfs) - polling this faster than
+// its fastest-changing half would just re-serve the same cached row.
+setInterval(loadStorage, 20000);
 </script>
 </body>
 </html>

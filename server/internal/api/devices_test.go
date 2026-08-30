@@ -295,3 +295,36 @@ func TestDeleteCurrentRequiresRetypingTheDeviceNameAndKeepsVersions(t *testing.T
 		t.Fatal("les versions précédentes ont été touchées par la suppression de la sauvegarde actuelle")
 	}
 }
+
+// EffectiveIntervalMinutes is what the dashboard uses to estimate when a
+// device's next backup should happen (see dashboard.html). It must
+// reflect a device's own override when it has one, and the server
+// default otherwise - the exact same resolution effectivePolicy already
+// does for the agent's own config endpoint, reused here for consistency.
+func TestEffectiveIntervalMinutesReflectsOverrideOrDefault(t *testing.T) {
+	a, id := testAPI(t)
+
+	device, err := models.GetDevice(a.DB, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := a.toDeviceView(*device)
+	settings, err := models.GetSettings(a.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.EffectiveIntervalMinutes != settings.DefaultIntervalMinutes {
+		t.Fatalf("intervalle effectif = %d, attendu la valeur par défaut du serveur (%d)",
+			view.EffectiveIntervalMinutes, settings.DefaultIntervalMinutes)
+	}
+
+	custom := settings.DefaultIntervalMinutes + 42
+	if err := models.UpdateDevicePolicy(a.DB, id, map[string]any{"interval_minutes": custom}); err != nil {
+		t.Fatal(err)
+	}
+	device, _ = models.GetDevice(a.DB, id)
+	view = a.toDeviceView(*device)
+	if view.EffectiveIntervalMinutes != custom {
+		t.Fatalf("intervalle effectif = %d, attendu la valeur propre à l'appareil (%d)", view.EffectiveIntervalMinutes, custom)
+	}
+}

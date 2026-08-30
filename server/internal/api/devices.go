@@ -23,17 +23,31 @@ type deviceView struct {
 	// Restoring means opening this folder and copying back what's needed,
 	// so the panel shows it rather than making an operator guess.
 	StorageDir string `json:"storage_dir"`
+	// EffectiveIntervalMinutes is this device's actual backup interval -
+	// its own override if it has one, the server default otherwise (see
+	// effectivePolicy). Sent so the panel can estimate when the next
+	// backup should happen (latest_snapshot.started_at + this many
+	// minutes) without having to separately fetch and merge the server's
+	// default settings itself. An estimate only: the real schedule,
+	// catch-ups included, is decided by the agent, which this server-only
+	// figure knows nothing about.
+	EffectiveIntervalMinutes int `json:"effective_interval_minutes"`
 }
 
 func (a *API) toDeviceView(d models.Device) deviceView {
 	latest, _ := models.LatestSnapshotForDevice(a.DB, d.ID)
 	count, _ := models.CountSuccessfulSnapshotsForDevice(a.DB, d.ID)
+	interval := 0
+	if settings, err := models.GetSettings(a.DB); err == nil {
+		interval, _, _ = effectivePolicy(&d, settings)
+	}
 	return deviceView{
-		Device:         d,
-		Online:         a.Hub.IsOnline(d.ID),
-		LatestSnapshot: latest,
-		SnapshotCount:  count,
-		StorageDir:     a.Store.Get().DeviceDir(d.ID, d.Name),
+		Device:                   d,
+		Online:                   a.Hub.IsOnline(d.ID),
+		LatestSnapshot:           latest,
+		SnapshotCount:            count,
+		StorageDir:               a.Store.Get().DeviceDir(d.ID, d.Name),
+		EffectiveIntervalMinutes: interval,
 	}
 }
 

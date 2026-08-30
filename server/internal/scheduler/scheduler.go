@@ -134,12 +134,28 @@ func refreshStorageUsage(db *sql.DB, store *filestore.Holder) {
 	}
 }
 
+// refreshStorageFree recomputes free space on the storage volume. Unlike
+// refreshStorageUsage this is a single statfs() call, not a walk (see
+// filestore.Store.FreeBytes), so it runs on every tick rather than every
+// storageUsageRefreshEvery ticks - there's no cost here worth pacing.
+func refreshStorageFree(db *sql.DB, store *filestore.Holder) {
+	freeBytes, err := store.Get().FreeBytes()
+	if err != nil {
+		log.Printf("scheduler: calcul de l'espace disponible: %v", err)
+		return
+	}
+	if err := models.UpdateStorageFree(db, freeBytes); err != nil {
+		log.Printf("scheduler: enregistrement de l'espace disponible: %v", err)
+	}
+}
+
 // Run blocks, performing periodic maintenance until ctx is cancelled.
 func Run(ctx context.Context, db *sql.DB, store *filestore.Holder, q *queue.Manager) {
 	// Computed once up front rather than waiting for the first tick: a
 	// server that just started (every deploy restarts it) would otherwise
-	// show no storage figure at all for the first several minutes.
+	// show no storage figures at all for the first several minutes.
 	refreshStorageUsage(db, store)
+	refreshStorageFree(db, store)
 
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -154,6 +170,9 @@ func Run(ctx context.Context, db *sql.DB, store *filestore.Holder, q *queue.Mana
 		case <-ticker.C:
 			tick++
 
+			// Free space is a cheap statfs(), refreshed every tick (once a
+			// minute); total usage is a full walk, refreshed far less often.
+			refreshStorageFree(db, store)
 			if tick%storageUsageRefreshEvery == 0 {
 				refreshStorageUsage(db, store)
 			}
