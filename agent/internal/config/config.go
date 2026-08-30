@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
+
+	"backup-agent/internal/userctx"
 )
 
 type Config struct {
@@ -39,13 +42,28 @@ func (c *Config) Enrolled() bool {
 
 // Dir returns the per-user directory the agent stores its config and
 // state cache in, creating it if necessary.
+//
+// Built from userctx.HomeDir() rather than os.UserConfigDir(): the latter
+// reads $HOME/%AppData% straight from the process environment, which a
+// privileged system service (Windows Service under LocalSystem, macOS
+// LaunchDaemon under root) doesn't have set to anything useful - on macOS
+// it's simply unset, and os.UserConfigDir() hard-fails with "$HOME is not
+// defined" instead of falling back to anything. userctx.HomeDir is exactly
+// the override point built for this: main.go points it at the console
+// user's real home when running as a service, so this resolves to the
+// same place either way.
 func Dir() (string, error) {
-	base, err := os.UserConfigDir()
+	home, err := userctx.HomeDir()
 	if err != nil {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return "", err
-		}
+		return "", err
+	}
+	var base string
+	switch runtime.GOOS {
+	case "windows":
+		base = filepath.Join(home, "AppData", "Roaming")
+	case "darwin":
+		base = filepath.Join(home, "Library", "Application Support")
+	default:
 		base = filepath.Join(home, ".config")
 	}
 	dir := filepath.Join(base, "BackupAgent")
