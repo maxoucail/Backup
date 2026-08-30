@@ -30,12 +30,17 @@ import (
 // upstream bandwidth - multiple devices backing up at the same time each
 // get their own such budget, handled independently by the server.
 //
-// Set higher than a single fast connection would need on its own: most of
-// a real backup's file count is small files (documents, photos), where
-// per-request round-trip latency - not link bandwidth - is what actually
-// caps throughput. Several uploads in flight at once hides that latency
-// behind each other instead of paying it serially file after file.
-const uploadConcurrency = 8
+// Briefly raised to 8 to hide per-request latency behind more uploads in
+// flight at once, on the reasoning that most of a real backup's file
+// count is small files where round-trip time, not link bandwidth, caps
+// throughput. Reverted: a device reachable only through a routed/VPN path
+// rather than a flat LAN (a different subnet than the server's) started
+// dropping several of those simultaneous new connections at once right at
+// the start of the upload phase - a middlebox on that path (NAT,
+// stateful firewall, VPN concentrator) apparently doesn't tolerate 8 at
+// once the way a plain switch does. 4 is the value this was tested against
+// for the rest of the project.
+const uploadConcurrency = 4
 
 type Progress struct {
 	Phase string // scanning / planning / uploading / finalizing

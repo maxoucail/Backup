@@ -26,6 +26,24 @@ import (
 // rather than retry forever.
 var ErrUnauthorized = errors.New("appareil non reconnu par le serveur (décommissionné ?)")
 
+// uploadClient is dedicated to UploadFile and never reuses a connection
+// across requests (DisableKeepAlives). Every other call on this package
+// shares Go's default transport and its keep-alive pool, which is fine for
+// small, quick requests - but a large file upload that dies mid-transfer
+// (a network blip, a server restart) can leave that shared TCP connection
+// in an indeterminate state; net/http is not always able to tell it apart
+// from one that's merely idle before the next request tries to reuse it,
+// and a request landing on a half-dead connection reads back as
+// nonsensical errors (a stray 405 for a perfectly normal request) that
+// have nothing to do with that request itself. Concurrent uploads for the
+// same device make this worse purely by having more connections in the
+// pool for one bad one to hide among. Uploads always paying for a fresh
+// TCP handshake is a trivial cost next to transferring the file itself.
+var uploadClient = &http.Client{
+	Timeout:   30 * time.Minute,
+	Transport: &http.Transport{DisableKeepAlives: true},
+}
+
 type Client struct {
 	ServerURL    string // e.g. http://192.168.1.10:8420
 	DeviceID     string
@@ -198,8 +216,7 @@ func (c *Client) UploadFile(ctx context.Context, relPath string, modTime, size i
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = size
-	client := &http.Client{Timeout: 30 * time.Minute}
-	return doJSON(client, req, nil)
+	return doJSON(uploadClient, req, nil)
 }
 
 func (c *Client) FinishSnapshot(ctx context.Context, snapshotID, status, errMsg string, uploadedBytes int64) error {
