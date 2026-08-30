@@ -82,6 +82,54 @@ func TestSendCommandDuringReconnectDoesNotPanic(t *testing.T) {
 	// closed channel would have panicked and failed the test binary.
 }
 
+// OnConnect is how main.go hooks the overdue-on-reconnect check (see
+// offerRescheduleIfOverdue in cmd/backup-server): it must fire for every
+// new connection, with the right device ID, before the caller can rely on
+// SendCommand reaching that device.
+func TestOnConnectFiresWithTheConnectingDeviceID(t *testing.T) {
+	hub := newTestHub(t)
+
+	var mu sync.Mutex
+	var got []string
+	hub.OnConnect = func(deviceID string) {
+		mu.Lock()
+		got = append(got, deviceID)
+		mu.Unlock()
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeAgent(w, r, "dev1", "127.0.0.1")
+	}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("OnConnect n'a jamais été appelé")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got[0] != "dev1" {
+		t.Fatalf("OnConnect appelé avec %q, attendu dev1", got[0])
+	}
+}
+
 // Progress arrives once per uploaded chunk - thousands of messages for a
 // large backup, multiplied by every device backing up at the same time.
 // Persisting each one would put SQLite's single writer under constant

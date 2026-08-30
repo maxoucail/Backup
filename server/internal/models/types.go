@@ -54,6 +54,18 @@ type Device struct {
 	BackupPaths     string     `json:"backup_paths,omitempty"` // JSON list; "" = agent defaults
 }
 
+// EffectiveIntervalMinutes resolves a device's actual backup interval: its
+// own override if it has one, the server default otherwise. The one place
+// this is computed, reused by the REST API (policy push, dashboard
+// estimate) and by the WS hub (overdue-on-reconnect check) so the two never
+// drift apart.
+func EffectiveIntervalMinutes(device *Device, settings *Settings) int {
+	if device.IntervalMinutes != nil {
+		return *device.IntervalMinutes
+	}
+	return settings.DefaultIntervalMinutes
+}
+
 const (
 	SnapshotStatusRunning   = "running"
 	SnapshotStatusSuccess   = "success"

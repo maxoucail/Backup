@@ -52,15 +52,16 @@ type Envelope struct {
 }
 
 const (
-	TypeHello          = "hello"
-	TypeConfig         = "config"
-	TypeBackupNow      = "backup_now"
-	TypeCancel         = "cancel"
-	TypeUninstall      = "uninstall"
-	TypeProgress       = "progress"
-	TypeLog            = "log"
-	TypeBackupStarted  = "backup_started"
-	TypeBackupFinished = "backup_finished"
+	TypeHello           = "hello"
+	TypeConfig          = "config"
+	TypeBackupNow       = "backup_now"
+	TypeCancel          = "cancel"
+	TypeUninstall       = "uninstall"
+	TypeOfferReschedule = "offer_reschedule" // server -> agent, was overdue when it reconnected
+	TypeProgress        = "progress"
+	TypeLog             = "log"
+	TypeBackupStarted   = "backup_started"
+	TypeBackupFinished  = "backup_finished"
 )
 
 const (

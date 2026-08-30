@@ -17,10 +17,7 @@ import (
 // config push sent over the WebSocket hub when an operator changes a
 // device's settings in the panel.
 func effectivePolicy(device *models.Device, settings *models.Settings) (intervalMinutes, retentionCount int, backupPaths []string) {
-	intervalMinutes = settings.DefaultIntervalMinutes
-	if device.IntervalMinutes != nil {
-		intervalMinutes = *device.IntervalMinutes
-	}
+	intervalMinutes = models.EffectiveIntervalMinutes(device, settings)
 	retentionCount = settings.DefaultRetentionCount
 	if device.RetentionCount != nil {
 		retentionCount = *device.RetentionCount

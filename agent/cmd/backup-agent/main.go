@@ -778,6 +778,8 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 					retention = *env.RetentionCount
 				}
 				pol.set(interval, retention, env.BackupPaths)
+			case protocol.TypeOfferReschedule:
+				go offerCatchUpSlot("le serveur signale que la machine était hors ligne au moment prévu de la sauvegarde")
 			}
 		}
 	}

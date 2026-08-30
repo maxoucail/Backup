@@ -59,6 +59,17 @@ type Hub struct {
 	// that vanished mid-backup, which would otherwise hold the whole fleet
 	// up until the stale sweep noticed.
 	OnDisconnect func(deviceID string)
+
+	// OnConnect, when set, is called once a newly (re)connected device is
+	// registered and can receive commands. main.go wires this to the
+	// overdue-on-reconnect check: a device that comes back online after
+	// missing its estimated slot gets sent TypeOfferReschedule so it can
+	// offer the user a new time, the same way it already does when it
+	// detects a missed backup on its own. Living in main.go rather than
+	// here keeps ws free of any dependency on how "overdue" is decided
+	// (models.EffectiveIntervalMinutes, settings) - this package only
+	// needs to know a connection happened.
+	OnConnect func(deviceID string)
 }
 
 func NewHub(db *sql.DB) *Hub {
@@ -119,6 +130,10 @@ func (h *Hub) ServeAgent(w http.ResponseWriter, r *http.Request, deviceID, remot
 
 	_ = models.UpdateDeviceSeen(h.db, deviceID, "online", remoteIP)
 	_ = models.AddEvent(h.db, &deviceID, models.EventLevelInfo, "Agent connecté.")
+
+	if h.OnConnect != nil {
+		h.OnConnect(deviceID)
+	}
 
 	done := make(chan struct{})
 	go h.writePump(ac, done)

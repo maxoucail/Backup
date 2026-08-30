@@ -46,13 +46,14 @@ type Envelope struct {
 
 // Message types.
 const (
-	TypeHello          = "hello"           // agent -> server, on connect
-	TypeConfig         = "config"          // server -> agent, policy push
-	TypeBackupNow      = "backup_now"      // server -> agent, manual trigger
-	TypeCancel         = "cancel"          // server -> agent, abort running job
-	TypeUninstall      = "uninstall"       // server -> agent, decommission and self-remove
-	TypeProgress       = "progress"        // agent -> server
-	TypeLog            = "log"             // agent -> server
-	TypeBackupStarted  = "backup_started"  // agent -> server
-	TypeBackupFinished = "backup_finished" // agent -> server
+	TypeHello           = "hello"            // agent -> server, on connect
+	TypeConfig          = "config"           // server -> agent, policy push
+	TypeBackupNow       = "backup_now"       // server -> agent, manual trigger
+	TypeCancel          = "cancel"           // server -> agent, abort running job
+	TypeUninstall       = "uninstall"        // server -> agent, decommission and self-remove
+	TypeOfferReschedule = "offer_reschedule" // server -> agent, was overdue when it reconnected
+	TypeProgress        = "progress"         // agent -> server
+	TypeLog             = "log"              // agent -> server
+	TypeBackupStarted   = "backup_started"   // agent -> server
+	TypeBackupFinished  = "backup_finished"  // agent -> server
 )

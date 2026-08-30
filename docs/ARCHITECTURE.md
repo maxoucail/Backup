@@ -267,16 +267,27 @@ silencieusement le cycle.
   minute) et écrit dans `settings.storage_free_bytes`/`storage_free_at`,
   lu par le même `GET /api/dashboard/storage` que le stockage utilisé.
 - **Prochaine sauvegarde (estimée)** : le tableau de bord affiche, par
-  appareil, un compte à rebours calculé côté panneau à partir de
-  `latest_snapshot.started_at` et de l'intervalle effectif de l'appareil
-  (`effective_interval_minutes` dans la réponse de
+  appareil, un compte à rebours (jour/heure/minute) calculé côté panneau à
+  partir de `latest_snapshot.started_at` et de l'intervalle effectif de
+  l'appareil (`effective_interval_minutes` dans la réponse de
   `GET /api/dashboard/devices` - la même résolution appareil/défaut que
-  `effectivePolicy` utilise déjà pour le point de configuration de
-  l'agent). Une estimation assumée comme telle : le vrai calendrier,
+  `models.EffectiveIntervalMinutes` utilise pour le point de configuration
+  de l'agent). Une estimation assumée comme telle : le vrai calendrier,
   rattrapages et reprogrammations compris, est décidé par l'agent, dont ce
-  chiffre côté serveur ne sait rien. Aucune modification de l'agent
-  n'était nécessaire - tout se calcule à partir de données que le serveur
-  connaît déjà.
+  chiffre côté serveur ne sait rien.
+- **Proposition de reprogrammation à la reconnexion** : quand un appareil
+  se reconnecte (`Hub.OnConnect`, câblé dans `cmd/backup-server/main.go` sur
+  `offerRescheduleIfOverdue`), le serveur compare l'heure actuelle à la même
+  estimation que ci-dessus (dernière sauvegarde réussie + intervalle
+  effectif). S'il est en retard, il envoie `TypeOfferReschedule` sur le
+  canal WebSocket. Contrairement au reste de cette section, ceci demande
+  une petite modification côté agent : un nouveau cas dans le switch des
+  messages entrants (`cmd/backup-agent/main.go`) qui appelle
+  `offerCatchUpSlot`, la fonction déjà utilisée quand l'agent détecte
+  lui-même une sauvegarde manquée ou échouée - donc sans nouvelle UI, juste
+  un déclencheur supplémentaire pour l'assistant de reprogrammation
+  existant. Un appareil jamais sauvegardé avec succès n'a rien dont être en
+  retard, et n'est jamais concerné.
 
 ## Agent : identification et politique
 

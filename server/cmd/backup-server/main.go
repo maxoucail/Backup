@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"os/signal"
@@ -75,6 +76,11 @@ func main() {
 	)
 	// A machine that drops off mid-backup must not hold the queue shut.
 	hub.OnDisconnect = backupQueue.Forget
+	// A machine reconnecting after having missed its estimated backup slot
+	// (asleep, unplugged, off the network) gets told to offer the user a
+	// new time right away, instead of silently waiting for its next
+	// regularly scheduled attempt.
+	hub.OnConnect = func(deviceID string) { offerRescheduleIfOverdue(sqlDB, hub, deviceID) }
 
 	apiServer := api.New(sqlDB, storeHolder, hub, sessions, backupQueue, cfg.DownloadsDir, cfg.AgentPort)
 	webServer, err := web.New(sessions)
@@ -126,6 +132,38 @@ func main() {
 	}
 	if err := agentSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("arrêt forcé (agent): %v", err)
+	}
+}
+
+// offerRescheduleIfOverdue checks whether a device that just (re)connected
+// has missed its estimated backup slot - the same estimate the dashboard
+// shows as "prochaine sauvegarde" (last successful start + effective
+// interval) - and if so, tells it to offer the user a new time. A device
+// that has never backed up successfully has nothing to be overdue against
+// yet, so it's left alone; a fresh connection racing the agent's own
+// scheduled attempt is harmless, since offerCatchUpSlot on the agent side
+// just opens the same picker it would show on its own.
+func offerRescheduleIfOverdue(sqlDB *sql.DB, hub *ws.Hub, deviceID string) {
+	device, err := models.GetDevice(sqlDB, deviceID)
+	if err != nil {
+		return
+	}
+	settings, err := models.GetSettings(sqlDB)
+	if err != nil {
+		return
+	}
+	lastStart, err := models.LastSuccessfulSnapshotStart(sqlDB, deviceID)
+	if err != nil || lastStart.IsZero() {
+		return
+	}
+	interval := models.EffectiveIntervalMinutes(device, settings)
+	dueAt := lastStart.Add(time.Duration(interval) * time.Minute)
+	if time.Now().Before(dueAt) {
+		return
+	}
+	if hub.SendCommand(deviceID, ws.Envelope{Type: ws.TypeOfferReschedule}) {
+		_ = models.AddEvent(sqlDB, &deviceID, models.EventLevelInfo,
+			"Sauvegarde en retard détectée à la reconnexion : proposition de reprogrammation envoyée.")
 	}
 }
 
