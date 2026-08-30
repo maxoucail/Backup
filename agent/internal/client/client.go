@@ -203,6 +203,21 @@ func (c *Client) Plan(ctx context.Context, snapshotID string, files []protocol.F
 	return out.Needed, out.Destination, nil
 }
 
+// noReaderFrom hides an io.Reader's concrete type behind a plain
+// interface value, keeping only Read. Go's net.TCPConn.ReadFrom
+// recognizes an *os.File source and hands it to the kernel's sendfile()
+// for a zero-copy send; on Linux and Windows that's a reliable win, but
+// Darwin's sendfile() has long-standing kernel bugs under concurrent use
+// that surface to callers as exactly the errors macOS reported here -
+// "sendfile: broken pipe", "sendfile: socket is not connected" - both are
+// Go's own internal/poll wrapper naming the syscall it used, not this
+// agent's own error text, and not a symptom of the network path. Wrapping
+// the reader so its type is no longer *os.File defeats that type check
+// and forces the ordinary buffered copy loop instead - a little less
+// "zero-copy" efficient, immaterial next to the time spent transferring
+// the file itself, and immune to the syscall this platform gets wrong.
+type noReaderFrom struct{ io.Reader }
+
 // UploadFile sends one file's raw bytes; the server writes it, in clear, at
 // the same relative location under the machine's folder on the NAS.
 // modTime is nanoseconds since epoch (see protocol.FileInfo).
@@ -210,7 +225,7 @@ func (c *Client) UploadFile(ctx context.Context, relPath string, modTime, size i
 	q := url.Values{}
 	q.Set("path", relPath)
 	q.Set("mtime", strconv.FormatInt(modTime, 10))
-	req, err := c.authRequest(ctx, http.MethodPut, "/api/agent/files?"+q.Encode(), r)
+	req, err := c.authRequest(ctx, http.MethodPut, "/api/agent/files?"+q.Encode(), noReaderFrom{r})
 	if err != nil {
 		return err
 	}
