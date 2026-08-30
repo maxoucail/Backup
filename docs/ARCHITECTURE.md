@@ -497,7 +497,14 @@ explicite à maintenir.
   un `NSMenuItem` déjà existant, sans déclenchement de rendu synchrone, ce
   qui reste dans la pratique le raccourci standard des utilitaires Cocoa
   minimalistes pour éviter d'avoir à faire transiter chaque rafraîchissement
-  par le thread principal.
+  par le thread principal. À la désinstallation (`macdaemon.Uninstall`),
+  ce processus n'est pas un enfant du daemon et ne s'arrête donc pas tout
+  seul quand celui-ci est déchargé - `pkill -f "backup-agent --menubar"`
+  le termine explicitement (root peut signaler n'importe quel processus
+  d'un autre utilisateur directement, sans passer par le détour
+  `launchctl asuser` nécessaire pour en *lancer* un dans une session
+  console). Sans ça l'icône serait restée visible jusqu'à son propre
+  délai d'abandon (cinq minutes sans réponse du service).
 
   **Statut** : implémenté et vérifié à la compilation (cross-compilation
   `darwin/amd64` et `darwin/arm64`, `go vet` propre) depuis cet

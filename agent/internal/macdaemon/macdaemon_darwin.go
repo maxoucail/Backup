@@ -75,6 +75,14 @@ func Uninstall() error {
 		return fmt.Errorf("droits root requis (sudo) pour désinstaller le daemon")
 	}
 	_ = exec.Command("launchctl", "bootout", "system", plistPath).Run()
+	// The menu bar helper (backup-agent --menubar) is a separate process
+	// living in the console user's own session (see
+	// LaunchInConsoleSession) - stopping the daemon above doesn't touch
+	// it. Left running, it would keep showing the icon for a good five
+	// minutes (its own unreachable-service timeout) after the actual
+	// service is already gone. Root can signal any user's process
+	// directly; no session-crossing trick is needed just to kill one.
+	_ = exec.Command("pkill", "-f", "backup-agent --menubar").Run()
 	return os.Remove(plistPath)
 }
 
