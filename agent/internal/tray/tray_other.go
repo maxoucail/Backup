@@ -4,10 +4,14 @@ package tray
 
 import "errors"
 
-// Run is Windows-only for now: a native macOS menu bar item needs CGO
-// (NSStatusBar), which this project deliberately avoids so every binary -
-// including the agent itself - can be cross-compiled from plain Linux
-// without a Mac. See docs/ARCHITECTURE.md.
+// Run is Windows-only: this package drives Shell_NotifyIconW directly.
+// macOS has its own equivalent, internal/macmenubar, since the two
+// platforms' native icon APIs have nothing in common to share here.
 func Run(controlBase string) error {
-	return errors.New("tray: uniquement disponible sur Windows pour le moment")
+	return errors.New("tray: uniquement disponible sur Windows")
 }
+
+// KillRunningHelper is a no-op here so cmd/backup-agent, a single file
+// shared by every platform, can call it unconditionally; the
+// Windows-only call site never actually reaches this on another OS.
+func KillRunningHelper() {}

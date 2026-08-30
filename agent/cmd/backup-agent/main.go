@@ -205,6 +205,12 @@ func runServiceMode(ctx context.Context) {
 // version would watch WTS session-change notifications; this simpler
 // version was judged good enough for a first pass.
 func ensureTrayHelperRunning(ctx context.Context, exePath string) {
+	// A previous run's helper (this service restarting, a crash, an
+	// update) is not a child of this process and so was never reaped -
+	// without this, every restart piled on another icon instead of
+	// replacing the last one.
+	tray.KillRunningHelper()
+
 	delay := 5 * time.Second
 	for {
 		select {

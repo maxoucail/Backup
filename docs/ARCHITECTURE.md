@@ -480,7 +480,14 @@ explicite à maintenir.
 
 - **Windows** (`internal/tray`, `backup-agent.exe --tray`) : Win32 pur
   (`Shell_NotifyIconW`, fenêtre cachée, menu contextuel classique) via
-  `syscall`, sans CGO.
+  `syscall`, sans CGO. Comme sur macOS, ce processus n'est pas un enfant
+  du service - chaque redémarrage du service (mise à jour, crash, arrêt/
+  relance manuel) lançait auparavant une nouvelle icône sans jamais tuer
+  la précédente, qui s'accumulaient indéfiniment. Le helper écrit
+  maintenant son PID dans `%ProgramData%\BackupAgent\tray.pid` au
+  démarrage ; `tray.KillRunningHelper` (appelée juste avant chaque
+  lancement, et à la désinstallation) le lit et termine ce PID précis
+  (`taskkill /F /PID`) avant d'en démarrer un nouveau.
 - **macOS** (`internal/macmenubar`, `backup-agent --menubar`) : un
   `NSStatusItem` piloté directement via le runtime Objective-C
   (`objc_msgSend`, `objc_getClass`, `sel_registerName`, une classe créée

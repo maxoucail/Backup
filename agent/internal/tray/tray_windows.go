@@ -21,13 +21,55 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"backup-agent/internal/config"
 	"backup-agent/internal/osui"
 )
+
+// pidFilePath is where the running helper records its own PID, so a
+// later launch or an uninstall can find and stop it precisely - reusing
+// ServiceLogDir (already the one world-readable, service-owned location
+// this agent uses on Windows) rather than inventing a new one.
+func pidFilePath() (string, error) {
+	dir, err := config.ServiceLogDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "tray.pid"), nil
+}
+
+// KillRunningHelper stops a previously launched tray helper, if its PID
+// file names one still alive. The helper is a standalone process in the
+// console user's session (see LaunchInConsoleSession), not a child of the
+// service - the service exiting or restarting never reaps it on its own,
+// so every restart used to leave the previous icon running forever
+// alongside a fresh one. Call this once before launching a new helper,
+// and again on uninstall so the icon doesn't outlive the service it
+// reports on. Best-effort throughout: a missing or stale PID file (the
+// process already gone) is the common case, not an error.
+func KillRunningHelper() {
+	path, err := pidFilePath()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+		_ = exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run()
+	}
+	_ = os.Remove(path)
+}
 
 var (
 	user32   = syscall.NewLazyDLL("user32.dll")
@@ -155,6 +197,11 @@ type state struct {
 // local control API, e.g. "http://127.0.0.1:47812".
 func Run(controlBase string) error {
 	runtime.LockOSThread() // Win32 windows are bound to the thread that created them
+
+	if path, err := pidFilePath(); err == nil {
+		_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644)
+		defer os.Remove(path)
+	}
 
 	className := utf16("BackupAgentTrayWindowClass")
 	hInstance, _, _ := procGetModuleHandleW.Call(0)

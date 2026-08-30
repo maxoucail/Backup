@@ -16,6 +16,8 @@ import (
 
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"backup-agent/internal/tray"
 )
 
 const ServiceName = "BackupAgent"
@@ -128,5 +130,9 @@ func Uninstall() error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+	// The tray icon runs in the console user's session, not as a child of
+	// this service - stopping the service above doesn't touch it, and left
+	// running it would linger indefinitely with nothing left to report on.
+	tray.KillRunningHelper()
 	return s.Delete()
 }
