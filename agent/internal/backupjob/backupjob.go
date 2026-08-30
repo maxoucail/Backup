@@ -43,6 +43,41 @@ type Progress struct {
 	EtaSeconds    int64
 }
 
+// etaWindow bounds how far back an etaCheckpoint looks to estimate the
+// current transfer rate.
+const etaWindow = 3 * time.Second
+
+// etaCheckpoint tracks the (time, bytes) of the last rate sample, so the
+// reported ETA reflects a recent window rather than the average since the
+// upload started. A cumulative average is dragged down for a long time by
+// the very first sample, which is dominated by fixed per-request overhead
+// (connection setup, the server's own bookkeeping for that file) rather
+// than real throughput - one small file taking, say, 200ms looks like a
+// few KB/s, and against a total of several GB that turns into an estimate
+// of hundreds of hours even on a fast LAN. Not safe for concurrent use;
+// the caller (Run's upload loop) already serializes access to it under
+// uploadedMu alongside the byte counter it derives its rate from.
+type etaCheckpoint struct {
+	at      time.Time
+	bytes   int64
+	lastETA int64
+}
+
+// update folds in a new (done, total) sample taken at now, rolling the
+// checkpoint forward and recomputing the ETA once at least etaWindow has
+// passed since the last one - otherwise it returns the ETA from the last
+// completed window, so the display doesn't reset to nothing between
+// windows or jitter on every single small file.
+func (c *etaCheckpoint) update(now time.Time, done, total int64) int64 {
+	if since := now.Sub(c.at); since >= etaWindow {
+		if rate := float64(done-c.bytes) / since.Seconds(); rate > 0 && done < total {
+			c.lastETA = int64(float64(total-done) / rate)
+		}
+		c.at, c.bytes = now, done
+	}
+	return c.lastETA
+}
+
 type ProgressFunc func(Progress)
 
 type Result struct {
@@ -136,7 +171,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []scanner.Roo
 		fatalErr      error
 		errMu         sync.Mutex
 	)
-	start := time.Now()
+	checkpoint := etaCheckpoint{at: time.Now()}
 
 	taskCh := make(chan string)
 	var wg sync.WaitGroup
@@ -153,15 +188,9 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []scanner.Roo
 				uploadedMu.Lock()
 				uploadedBytes += n
 				done := uploadedBytes
+				eta := checkpoint.update(time.Now(), done, totalToUpload)
 				uploadedMu.Unlock()
 
-				elapsed := time.Since(start).Seconds()
-				var eta int64
-				if elapsed > 0.5 && done > 0 {
-					if rate := float64(done) / elapsed; rate > 0 {
-						eta = int64(float64(totalToUpload-done) / rate)
-					}
-				}
 				pct := 100.0
 				if totalToUpload > 0 {
 					pct = 100 * float64(done) / float64(totalToUpload)
