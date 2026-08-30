@@ -373,11 +373,39 @@ est protégé par TCC (Transparency, Consent and Control) : même un daemon
 root n'y a pas accès sans une autorisation explicite accordée par un humain
 dans Réglages Système → Confidentialité et sécurité → Accès complet au
 disque. Aucun installeur ne peut accorder cette permission à la place de
-l'utilisateur - Apple l'interdit délibérément. `scanner.CheckAccess`
-détecte les dossiers inaccessibles (erreur de permission distincte d'un
-dossier absent) et l'agent envoie une notification native + un événement
-dans le panneau pour guider l'opérateur. C'est une limite de la plateforme,
-pas du logiciel.
+l'utilisateur - Apple l'interdit délibérément. C'est une limite de la
+plateforme, pas du logiciel.
+
+Deux couches détectent une autorisation manquante ou révoquée, parce
+qu'elles ne voient pas le même symptôme :
+
+- `scanner.CheckAccess` fait un simple `os.ReadDir` sur chaque dossier
+  configuré avant de démarrer - mais **lister** ces quatre dossiers
+  fonctionne déjà sans Accès complet au disque ; seule la **lecture du
+  contenu** de chaque fichier l'exige. Cette vérification ne détecte donc
+  qu'un dossier totalement bloqué (rare), pas le cas réel le plus fréquent.
+- `backupjob.Run` compte, après coup, combien de fichiers l'OS a
+  explicitement refusés (`os.IsPermission`, distinct d'un fichier modifié
+  ou verrouillé) parmi ceux qu'il fallait envoyer. Une minorité est du
+  bruit ordinaire ; une majorité (`isDiskAccessDenied`) est le signe d'une
+  autorisation révoquée sur un dossier entier - le scan avait vu et
+  chiffré les fichiers via `os.ReadDir`/`os.Stat` (d'où un total en Go
+  correct malgré tout), mais presque aucun n'a pu être lu pour l'envoi.
+  Dans ce cas la sauvegarde est explicitement marquée en échec
+  (`ErrPermissionDenied`) plutôt que rapportée comme un succès qui n'a en
+  réalité presque rien protégé, et l'agent envoie une notification native
+  avec la marche à suivre.
+
+Autre piège propre à cette plateforme : l'agent n'étant pas signé avec un
+certificat Apple Developer, TCC a tendance à lier une autorisation aux
+octets exacts du binaire - recompiler pour une mise à jour, même sans rien
+changer de comportement, peut suffire à invalider le grant précédent.
+`install.command` signe maintenant le binaire en ad-hoc
+(`codesign --sign - --identifier com.backupcenter.agent`, gratuit, sans
+compte développeur) pour donner à TCC une identité stable d'une mise à
+jour à l'autre ; ça aide en pratique mais ne le garantit pas complètement
+comme le ferait un vrai certificat Developer ID payant - une réinstallation
+après une mise à jour plus profonde peut encore redemander l'autorisation.
 
 ## Sauvegarde manquée et rattrapage programmé
 

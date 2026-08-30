@@ -93,6 +93,14 @@ func (c *etaCheckpoint) update(now time.Time, done, total int64) (etaSeconds int
 	return c.lastETA, c.lastRate
 }
 
+// ErrPermissionDenied wraps the error Run returns when a majority of the
+// files it needed to send were refused outright by the OS (as opposed to
+// missing, edited mid-run, or any other per-file hiccup) - the shape a
+// revoked macOS Full Disk Access grant produces. Callers can check for it
+// with errors.Is to put something more actionable on screen than a
+// generic "backup failed".
+var ErrPermissionDenied = errors.New("accès refusé pour la plupart des fichiers")
+
 type ProgressFunc func(Progress)
 
 type Result struct {
@@ -180,11 +188,12 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []scanner.Roo
 	onProgress(Progress{Phase: "uploading", SnapshotID: snapshotID, FileCount: len(files), LogicalBytes: logicalBytes})
 
 	var (
-		uploadedBytes int64
-		uploadedMu    sync.Mutex
-		skippedFiles  []string
-		fatalErr      error
-		errMu         sync.Mutex
+		uploadedBytes    int64
+		uploadedMu       sync.Mutex
+		skippedFiles     []string
+		permissionDenied int
+		fatalErr         error
+		errMu            sync.Mutex
 	)
 	checkpoint := etaCheckpoint{at: time.Now()}
 
@@ -197,7 +206,7 @@ func Run(ctx context.Context, c *client.Client, kind string, roots []scanner.Roo
 			for rel := range taskCh {
 				n, err := uploadOne(ctx, c, rel, absByRel[rel])
 				if err != nil {
-					noteFileFailure(&errMu, &skippedFiles, &fatalErr, rel, err)
+					noteFileFailure(&errMu, &skippedFiles, &permissionDenied, &fatalErr, rel, err)
 					continue
 				}
 				uploadedMu.Lock()
@@ -247,6 +256,27 @@ loop:
 		return finishFailed(ctx, c, snapshotID,
 			"aucun fichier n'a pu être envoyé", protocol.SnapshotStatusFailed)
 	}
+	// A majority of files rejected by the OS itself (not "modified or
+	// locked" - actually refused) is the exact shape of macOS revoking
+	// Full Disk Access: directory listing still works (that's how the
+	// scan phase found these files and their sizes at all), but opening
+	// their contents doesn't, across an entire protected folder. A
+	// handful of files uploading fine from outside those folders would
+	// otherwise let this land as a "successful" backup that actually
+	// protected almost nothing - the exact silent failure that erodes
+	// trust in the whole system. ErrPermissionDenied lets the caller put
+	// a specific, actionable notification on screen instead of a generic
+	// failure log line.
+	if isDiskAccessDenied(permissionDenied, len(needed)) {
+		msg := fmt.Sprintf("%d des %d fichiers à envoyer ont été refusés par le système d'exploitation "+
+			"(pas modifiés ou verrouillés : un vrai refus d'accès). Sur macOS, autorisez backup-agent dans "+
+			"Réglages Système -> Confidentialité et sécurité -> Accès complet au disque, puis relancez une sauvegarde.",
+			permissionDenied, len(needed))
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		_ = c.FinishSnapshot(finishCtx, snapshotID, protocol.SnapshotStatusFailed, msg, 0)
+		cancel()
+		return nil, fmt.Errorf("%w: %s", ErrPermissionDenied, msg)
+	}
 
 	onProgress(Progress{Phase: "finalizing", SnapshotID: snapshotID, FileCount: len(files), LogicalBytes: logicalBytes, UploadedBytes: uploadedBytes, Percent: 100})
 
@@ -295,16 +325,30 @@ func uploadOne(ctx context.Context, c *client.Client, relPath, absPath string) (
 // authentication failure is escalated to fatal: the device has been
 // decommissioned server-side, so every remaining file would fail too and
 // the agent needs to stop and re-enroll rather than grind through the
-// whole list.
-func noteFileFailure(mu *sync.Mutex, skipped *[]string, fatal *error, relPath string, err error) {
+// whole list. permissionDenied separately counts read failures the OS
+// itself refused (os.IsPermission) - see the check after the upload loop
+// in Run, which turns "most files hit this" into a clear failure instead
+// of a quiet, mostly-empty "success".
+func noteFileFailure(mu *sync.Mutex, skipped *[]string, permissionDenied *int, fatal *error, relPath string, err error) {
 	mu.Lock()
 	defer mu.Unlock()
 	*skipped = append(*skipped, relPath)
+	if os.IsPermission(err) {
+		*permissionDenied++
+	}
 	if errors.Is(err, client.ErrUnauthorized) && *fatal == nil {
 		*fatal = err
 		return
 	}
 	log.Printf("backup: fichier ignoré %s: %v", relPath, err)
+}
+
+// isDiskAccessDenied distinguishes "most of what we needed to send was
+// outright refused by the OS" from routine noise (a locked file, one edited
+// mid-run): a lone permission error is unremarkable, but a majority is the
+// signature of a revoked macOS Full Disk Access grant, not chance.
+func isDiskAccessDenied(permissionDenied, needed int) bool {
+	return permissionDenied > 0 && permissionDenied*2 >= needed
 }
 
 func finishFailed(ctx context.Context, c *client.Client, snapshotID, message, status string) (*Result, error) {

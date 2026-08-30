@@ -547,6 +547,17 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			status, errMsg = protocol.SnapshotStatusFailed, err.Error()
 			checkAuth(err)
 			log.Printf("sauvegarde échouée: %v", err)
+			// warnIfBlocked above only catches a folder that can't be
+			// listed at all - macOS lets that succeed for the protected
+			// folders even without Full Disk Access, so a revoked grant
+			// only shows up here, once most individual file reads have
+			// actually failed. Without this, that run would otherwise
+			// just look like a quiet, mostly-empty "success" with no clear
+			// signal anything was wrong.
+			if errors.Is(err, backupjob.ErrPermissionDenied) {
+				osui.Notify("Sauvegarde bloquée (accès refusé)",
+					"La plupart des fichiers n'ont pas pu être lus. Ouvrez Réglages Système → Confidentialité et sécurité → Accès complet au disque, et autorisez Backup Agent, puis relancez une sauvegarde.")
+			}
 		} else {
 			log.Printf("sauvegarde terminée: %d fichiers, %d octets envoyés", result.FileCount, result.UploadedBytes)
 			if n := len(result.SkippedFiles); n > 0 {
