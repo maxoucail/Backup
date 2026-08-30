@@ -267,6 +267,14 @@ loop:
 	// trust in the whole system. ErrPermissionDenied lets the caller put
 	// a specific, actionable notification on screen instead of a generic
 	// failure log line.
+	//
+	// Deliberately scoped to this one cause (os.IsPermission), not to
+	// "most files failed" in general: a server restart, a network drop,
+	// or anything else severing in-flight uploads mid-run can just as
+	// easily fail most of a backup, and that is not a reason to escalate
+	// to a hard failure - it's an expected, ordinary side effect of taking
+	// the server down while a backup happens to be running, not a symptom
+	// of anything broken on this machine.
 	if isDiskAccessDenied(permissionDenied, len(needed)) {
 		msg := fmt.Sprintf("%d des %d fichiers à envoyer ont été refusés par le système d'exploitation "+
 			"(pas modifiés ou verrouillés : un vrai refus d'accès). Sur macOS, autorisez backup-agent dans "+
