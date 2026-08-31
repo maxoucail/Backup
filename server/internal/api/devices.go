@@ -2,12 +2,14 @@ package api
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"backup-server/internal/filestore"
 	"backup-server/internal/models"
@@ -311,10 +313,57 @@ type versionView struct {
 	SizeBytes int64  `json:"size_bytes"`
 }
 
+// currentSizeCacheTTL bounds how stale the live mirror's cached size (see
+// cachedCurrentUsedBytes) can be - short enough that a backup which just
+// finished shows up promptly, long enough that opening the versions panel
+// twice in a row over a slow NAS doesn't pay for a second full walk.
+const currentSizeCacheTTL = 2 * time.Minute
+
+// cachedVersionSize is store.DeviceUsedBytes for one previous version's
+// folder, memoized in the database forever. Unlike the live mirror, a
+// previous version is written once when it's created (see
+// filestore.Rotate/SnapshotCurrent) and never modified again short of
+// being deleted outright - handleDeleteVersion evicts its row below - so
+// the first computation is the only one that will ever be needed for it.
+//
+// Kept in the database rather than in memory so a server restart (routine
+// after every deploy) doesn't throw the cache away and make the very next
+// panel load pay full price again.
+func cachedVersionSize(db *sql.DB, store *filestore.Store, deviceID, name, dir string) int64 {
+	if bytes, _, ok, err := models.GetCachedSize(db, deviceID, name); err == nil && ok {
+		return bytes
+	}
+	bytes := store.DeviceUsedBytes(dir)
+	_ = models.SetCachedSize(db, deviceID, name, bytes)
+	return bytes
+}
+
+// cachedCurrentUsedBytes is store.CurrentUsedBytes for a machine's live
+// mirror, memoized for currentSizeCacheTTL. The live mirror does change
+// (every backup), so unlike cachedVersionSize this can't cache forever -
+// but a couple of minutes of staleness on a size figure is the same
+// tradeoff the dashboard's fleet-wide total already makes (see
+// scheduler.refreshStorageUsage).
+func cachedCurrentUsedBytes(db *sql.DB, store *filestore.Store, deviceID, deviceDir string) int64 {
+	if bytes, at, ok, err := models.GetCachedSize(db, deviceID, models.CurrentSizeScope); err == nil && ok && time.Since(at) < currentSizeCacheTTL {
+		return bytes
+	}
+	bytes := store.CurrentUsedBytes(deviceDir)
+	_ = models.SetCachedSize(db, deviceID, models.CurrentSizeScope, bytes)
+	return bytes
+}
+
 // handleListVersions reports what's actually on the NAS for one machine:
 // the live mirror (its up-to-date copy) plus every previous version kept
 // by retention. This is the panel's answer to "where do I go to get my
 // files back", so it deals in folders on disk, not database rows.
+//
+// Computing each of these sizes is a full recursive stat() of every file
+// on whatever's backing storage - fine once, ruinous when this used to run
+// fresh on every single load of the panel's versions tab: on a real NAS
+// with years of history, that was minutes (sometimes much longer) of dead
+// time before an operator could even click the delete button they came
+// for. See cachedVersionSize/cachedCurrentUsedBytes above.
 func (a *API) handleListVersions(w http.ResponseWriter, r *http.Request, id string) {
 	device, err := models.GetDevice(a.DB, id)
 	if err != nil {
@@ -333,13 +382,13 @@ func (a *API) handleListVersions(w http.ResponseWriter, r *http.Request, id stri
 		versions = append(versions, versionView{
 			Name:      name,
 			Path:      dir,
-			SizeBytes: store.CachedVersionUsedBytes(dir),
+			SizeBytes: cachedVersionSize(a.DB, store, device.ID, name, dir),
 		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"storage_dir":     deviceDir,
-		"used_bytes":      store.CachedCurrentUsedBytes(deviceDir),
+		"used_bytes":      cachedCurrentUsedBytes(a.DB, store, device.ID, deviceDir),
 		"versions":        versions,
 		"versions_folder": filestore.VersionsDirName,
 	})
@@ -378,6 +427,7 @@ func (a *API) handleDeleteVersion(w http.ResponseWriter, r *http.Request, id, na
 		writeError(w, http.StatusBadRequest, "suppression impossible: "+err.Error())
 		return
 	}
+	_ = models.DeleteCachedSize(a.DB, id, name)
 	_ = models.AddEvent(a.DB, &id, models.EventLevelInfo,
 		fmt.Sprintf("Ancienne version %q supprimée depuis le panneau.", name))
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
@@ -414,6 +464,10 @@ func (a *API) handleDeleteCurrent(w http.ResponseWriter, r *http.Request, id str
 		writeError(w, http.StatusInternalServerError, "erreur serveur")
 		return
 	}
+	// Evicted rather than left to expire on its own TTL: an operator who
+	// just wiped the live mirror should see "0 octet" on the next load, not
+	// whatever nonzero figure was cached up to currentSizeCacheTTL ago.
+	_ = models.DeleteCachedSize(a.DB, id, models.CurrentSizeScope)
 	_ = models.AddEvent(a.DB, &id, models.EventLevelWarning,
 		"Sauvegarde actuelle supprimée depuis le panneau : la prochaine sauvegarde repartira de zéro pour cet appareil.")
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})

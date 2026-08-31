@@ -817,87 +817,9 @@ func TestRemoveCurrentOnAnUnbackedUpDeviceIsANoOp(t *testing.T) {
 	}
 }
 
-// This is the exact operator complaint: on a real NAS, DeviceUsedBytes and
-// CurrentUsedBytes are a full recursive stat() of every file - fine once,
-// ruinous when handleListVersions (see api/devices.go) called them fresh
-// for every previous version plus the live mirror on every single load of
-// the panel's versions tab. A previous version's folder is written once
-// and never touched again short of deletion, so CachedVersionUsedBytes
-// must hand back the exact same number on a second call without walking
-// the tree again - proven here by changing what's on disk after the first
-// call and confirming the second call doesn't notice.
-func TestCachedVersionUsedBytesMemoizesForever(t *testing.T) {
-	s := newStore(t)
-	dir := s.DeviceDir("dev1", "PC")
-	confirm(t, s, dir, "snap1", "Bureau/rapport.docx", "contenu", ns(1700000000))
-	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
-		t.Fatal(err)
-	}
-	versions := s.ListVersions(dir)
-	if len(versions) != 1 {
-		t.Fatalf("versions = %v, attendu 1", versions)
-	}
-	versionDir, err := s.VersionDir(dir, versions[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	first := s.CachedVersionUsedBytes(versionDir)
-	if first != int64(len("contenu")) {
-		t.Fatalf("premier calcul = %d, attendu %d", first, len("contenu"))
-	}
-
-	// Poke a file straight onto disk, bypassing the store - a real version
-	// folder never changes after creation, so this only proves the cache
-	// really is memoizing rather than happening to recompute the same
-	// number by coincidence.
-	if err := os.WriteFile(filepath.Join(versionDir, "intrus.txt"), []byte("supplementaire"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := s.CachedVersionUsedBytes(versionDir); got != first {
-		t.Fatalf("second calcul = %d, attendu %d (valeur mise en cache, pas recalculée)", got, first)
-	}
-
-	// Deleting the version must evict its cache entry: a version created
-	// later under the same name (retention names versions after a
-	// timestamp, so this is contrived, but it's the only way to observe
-	// eviction without reaching into the private cache map) must get a
-	// fresh computation, not the old one's stale number.
-	if err := s.RemoveVersion(dir, versions[0]); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(versionDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(versionDir, "nouveau.txt"), []byte("ab"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := s.CachedVersionUsedBytes(versionDir); got != 2 {
-		t.Fatalf("calcul après suppression+recréation = %d, attendu 2 (RemoveVersion doit avoir purgé le cache)", got)
-	}
-}
-
-// The live mirror does change (every backup), so its cached size can't be
-// memoized forever the way a previous version's can - but it also
-// shouldn't be recomputed on every single call, or caching it buys
-// nothing. currentSizeTTL is overridden here to a few milliseconds so the
-// test doesn't have to sleep for the real multi-minute default.
-func TestCachedCurrentUsedBytesHonoursTTL(t *testing.T) {
-	s := newStore(t)
-	s.currentSizeTTL = 200 * time.Millisecond
-	dir := s.DeviceDir("dev1", "PC")
-	confirm(t, s, dir, "snap1", "Bureau/rapport.docx", "contenu", ns(1700000000))
-
-	first := s.CachedCurrentUsedBytes(dir)
-
-	put(t, s, dir, "Bureau/second.docx", "un fichier de plus", ns(1700000001))
-	if got := s.CachedCurrentUsedBytes(dir); got != first {
-		t.Fatalf("appel immédiat = %d, attendu %d (doit rester dans la fenêtre de cache)", got, first)
-	}
-
-	time.Sleep(300 * time.Millisecond)
-	if got := s.CachedCurrentUsedBytes(dir); got == first {
-		t.Fatalf("appel après expiration du TTL = %d, identique à avant alors que le fichier ajouté aurait dû être compté", got)
-	}
-}
+// The size caching that makes handleListVersions fast on a big NAS (see
+// api/devices.go) is layered on top of DeviceUsedBytes/CurrentUsedBytes in
+// package models instead of here - filestore stays a pure filesystem
+// package with no database dependency. See
+// models.TestCachedVersionSizeMemoizesForever and
+// models.TestCachedCurrentUsedBytesHonoursTTL for those tests.

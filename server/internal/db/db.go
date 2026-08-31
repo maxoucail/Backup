@@ -104,6 +104,23 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_device ON events(device_id, ts);
+
+-- storage_size_cache memoizes the expensive part of handleListVersions
+-- (see api/devices.go): the size of one machine's live mirror or of one
+-- previous version, each a full recursive stat() of every file on
+-- whatever's backing storage - minutes, sometimes much longer, on a real
+-- NAS with years of history. scope is 'current' for the live mirror, or a
+-- previous version's folder name otherwise. Kept in the database rather
+-- than in memory so a server restart (routine after every deploy) doesn't
+-- throw the whole cache away and make the next panel load pay full price
+-- again - see models.CachedVersionSize / CachedCurrentUsedBytes.
+CREATE TABLE IF NOT EXISTS storage_size_cache (
+	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	scope TEXT NOT NULL,
+	bytes INTEGER NOT NULL,
+	computed_at DATETIME NOT NULL,
+	PRIMARY KEY (device_id, scope)
+);
 `
 
 // Open opens (creating if necessary) the SQLite database and applies the

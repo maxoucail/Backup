@@ -135,16 +135,6 @@ type Store struct {
 	linkChecked  bool
 	linkSupport  bool
 	linkWarnOnce sync.Once
-
-	// sizeMu guards sizeCache, see cachedSize.
-	sizeMu    sync.Mutex
-	sizeCache map[string]sizeCacheEntry
-
-	// currentSizeTTL is how long a live mirror's cached size is trusted
-	// before CachedCurrentUsedBytes walks the tree again. A field rather
-	// than the plain constant below so tests can shrink it instead of
-	// sleeping for real minutes.
-	currentSizeTTL time.Duration
 }
 
 func New(root string) (*Store, error) {
@@ -154,7 +144,7 @@ func New(root string) (*Store, error) {
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, fmt.Errorf("création du stockage %s: %w", root, err)
 	}
-	return &Store{Root: root, currentSizeTTL: currentSizeTTL}, nil
+	return &Store{Root: root}, nil
 }
 
 // SanitizeSegment turns one path component into something safe to place on
@@ -772,11 +762,7 @@ func (s *Store) RemoveVersion(deviceDir, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return err
-	}
-	s.evictSize(dir)
-	return nil
+	return os.RemoveAll(dir)
 }
 
 // Rotate keeps the most recent keepVersions previous versions and deletes
@@ -801,7 +787,6 @@ func (s *Store) Rotate(deviceDir string, keepVersions int) (deleted int) {
 			log.Printf("rétention: suppression de %s impossible: %v", full, err)
 			continue
 		}
-		s.evictSize(full)
 		deleted++
 	}
 	return deleted
@@ -907,81 +892,6 @@ func (s *Store) CurrentUsedBytes(deviceDir string) int64 {
 	return total
 }
 
-// currentSizeTTL bounds how stale a live mirror's cached size can be (see
-// CachedCurrentUsedBytes) - short enough that a backup which just finished
-// shows up promptly, long enough that opening the versions panel twice in
-// a row over a slow NAS doesn't pay for a second full walk.
-const currentSizeTTL = 2 * time.Minute
-
-type sizeCacheEntry struct {
-	bytes int64
-	at    time.Time
-}
-
-// cachedSize memoizes an expensive size computation under key, honouring
-// ttl (zero means "cache forever, until evictSize is called").
-//
-// handleListVersions (see api/devices.go) used to call DeviceUsedBytes and
-// CurrentUsedBytes directly - a full recursive stat() of every file, for
-// every previous version plus the live mirror, on every single page load
-// of the panel's versions tab. Over a real NAS with years of history that
-// is minutes, sometimes much longer, of dead time before an operator can
-// even click the delete button they came for. The two methods below wrap
-// the same walks behind this cache instead of changing what they compute.
-func (s *Store) cachedSize(key string, ttl time.Duration, compute func() int64) int64 {
-	s.sizeMu.Lock()
-	if e, ok := s.sizeCache[key]; ok && (ttl == 0 || time.Since(e.at) < ttl) {
-		s.sizeMu.Unlock()
-		return e.bytes
-	}
-	s.sizeMu.Unlock()
-
-	bytes := compute()
-
-	s.sizeMu.Lock()
-	if s.sizeCache == nil {
-		s.sizeCache = make(map[string]sizeCacheEntry)
-	}
-	s.sizeCache[key] = sizeCacheEntry{bytes: bytes, at: time.Now()}
-	s.sizeMu.Unlock()
-	return bytes
-}
-
-// evictSize drops one cached size, or every cached size under a directory
-// that's about to stop existing (prefix, for RemoveDevice) - so a later
-// call never hands back a number for a version or a device that was just
-// deleted.
-func (s *Store) evictSize(prefix string) {
-	s.sizeMu.Lock()
-	defer s.sizeMu.Unlock()
-	for key := range s.sizeCache {
-		if key == prefix || strings.HasPrefix(key, prefix+string(filepath.Separator)) {
-			delete(s.sizeCache, key)
-		}
-	}
-}
-
-// CachedVersionUsedBytes is DeviceUsedBytes for one previous version's
-// folder, memoized forever. Unlike the live mirror, a previous version is
-// written once when it's created (see Rotate/SnapshotCurrent) and never
-// modified again short of being deleted outright - RemoveVersion evicts
-// its entry below - so the first computation is the only one that will
-// ever be needed for it.
-func (s *Store) CachedVersionUsedBytes(dir string) int64 {
-	return s.cachedSize(dir, 0, func() int64 { return s.DeviceUsedBytes(dir) })
-}
-
-// CachedCurrentUsedBytes is CurrentUsedBytes for a machine's live mirror,
-// memoized for currentSizeTTL. The live mirror does change (every
-// backup), so unlike CachedVersionUsedBytes this can't cache forever -
-// but a couple of minutes of staleness on a size figure is the same
-// tradeoff the dashboard's fleet-wide total already makes (see
-// scheduler.refreshStorageUsage), and it's what turns "open the versions
-// tab twice" from two full NAS walks into one.
-func (s *Store) CachedCurrentUsedBytes(deviceDir string) int64 {
-	return s.cachedSize(deviceDir, s.currentSizeTTL, func() int64 { return s.CurrentUsedBytes(deviceDir) })
-}
-
 // RenameDevice moves a machine's folder when an operator renames it in the
 // panel.
 //
@@ -1053,7 +963,6 @@ func (s *Store) RemoveCurrent(deviceDir string) error {
 			return err
 		}
 	}
-	s.evictSize(deviceDir)
 	return nil
 }
 
@@ -1062,9 +971,5 @@ func (s *Store) RemoveDevice(deviceDir string) error {
 	if err := s.checkInsideRoot(deviceDir); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(deviceDir); err != nil {
-		return err
-	}
-	s.evictSize(deviceDir)
-	return nil
+	return os.RemoveAll(deviceDir)
 }
