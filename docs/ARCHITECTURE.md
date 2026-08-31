@@ -422,6 +422,30 @@ la racine avec `filepath.EvalSymlinks` avant de la marcher (tout en gardant
 comportement volontaire de ne jamais suivre un lien symbolique rencontré
 *pendant* le parcours.
 
+## Empêcher la mise en veille pendant une sauvegarde
+
+Une machine qui s'endort en plein envoi ne met pas la sauvegarde en pause
+pour la reprendre au réveil : la connexion tombe purement et simplement.
+Et comme une coupure de connexion n'est délibérément pas traitée comme un
+refus de permission (voir `backupjob.isDiskAccessDenied` plus haut, qui ne
+regarde que les vrais refus d'accès, pas les déconnexions), une sauvegarde
+interrompue par la veille pouvait finir enregistrée comme terminée - avec
+un tas de fichiers ignorés - plutôt que comme l'interruption réelle
+qu'elle était.
+
+Le paquet `keepawake` empêche la veille automatique le temps d'une
+sauvegarde : `SetThreadExecutionState` (avec `ES_SYSTEM_REQUIRED`) sur
+Windows, un sous-processus `caffeinate -i -s` sur macOS - relâché dès que
+la sauvegarde se termine, réussite ou échec. `runBackup` (main.go)
+l'appelle avant `backupjob.Run` et le relâche en `defer`.
+
+Cette protection a une limite assumée sur les deux plateformes : elle
+n'empêche que la veille *automatique* (le système qui décide de lui-même
+que rien ne se passe). Elle ne peut pas empêcher un utilisateur qui ferme
+le capot de son portable ou choisit "Mettre en veille" à la main - les
+deux OS traitent ça comme un ordre inconditionnel, indépendamment de ce
+qui tourne.
+
 ## Sauvegarde manquée et rattrapage programmé
 
 Chaque sauvegarde planifiée réussie enregistre la date de la prochaine

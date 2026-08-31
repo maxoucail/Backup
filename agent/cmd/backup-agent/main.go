@@ -31,6 +31,7 @@ import (
 	"backup-agent/internal/backupjob"
 	"backup-agent/internal/client"
 	"backup-agent/internal/config"
+	"backup-agent/internal/keepawake"
 	"backup-agent/internal/knownfolders"
 	"backup-agent/internal/macdaemon"
 	"backup-agent/internal/macmenubar"
@@ -514,6 +515,14 @@ func runAgent(ctx context.Context, cfg *config.Config) exitReason {
 			return
 		}
 		defer done()
+
+		// A machine that idle-sleeps mid-upload doesn't pause the backup and
+		// resume it later - the connection just drops, and the run can end
+		// up looking finished (with a pile of skipped files) rather than
+		// interrupted. Held for the whole backup, released the moment it
+		// ends either way.
+		stopKeepAwake := keepawake.Start()
+		defer stopKeepAwake()
 
 		popup := existingPopup
 		if popup == nil && kind == protocol.SnapshotKindManual {
