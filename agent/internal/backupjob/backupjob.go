@@ -30,17 +30,21 @@ import (
 // upstream bandwidth - multiple devices backing up at the same time each
 // get their own such budget, handled independently by the server.
 //
-// Briefly raised to 8 to hide per-request latency behind more uploads in
-// flight at once, on the reasoning that most of a real backup's file
-// count is small files where round-trip time, not link bandwidth, caps
-// throughput. Reverted: a device reachable only through a routed/VPN path
-// rather than a flat LAN (a different subnet than the server's) started
-// dropping several of those simultaneous new connections at once right at
-// the start of the upload phase - a middlebox on that path (NAT,
-// stateful firewall, VPN concentrator) apparently doesn't tolerate 8 at
-// once the way a plain switch does. 4 is the value this was tested against
-// for the rest of the project.
-const uploadConcurrency = 4
+// Set higher than a single connection would need on its own: most of a
+// real backup's file count is small files, where round-trip time - worse
+// still on a routed/VPN path than a flat LAN - caps throughput more than
+// link bandwidth does. Several uploads in flight at once hides that
+// latency behind each other instead of paying it serially file after
+// file. Briefly reverted to 4 on a wrong diagnosis: a macOS device on
+// such a path started dropping several new connections at once right at
+// the start of the upload phase, which looked at the time like 8
+// concurrent connections were too many for a middlebox on that path to
+// tolerate. The real cause turned out to be entirely different - macOS's
+// sendfile() misbehaving under concurrent use (see client.noReaderFrom) -
+// and had nothing to do with how many uploads ran at once; back to 8 now
+// that the actual bug is fixed. If client.uploadClient's
+// MaxIdleConnsPerHost is ever lowered, keep it at least this high too.
+const uploadConcurrency = 8
 
 type Progress struct {
 	Phase string // scanning / planning / uploading / finalizing

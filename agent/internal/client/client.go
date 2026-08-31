@@ -26,22 +26,24 @@ import (
 // rather than retry forever.
 var ErrUnauthorized = errors.New("appareil non reconnu par le serveur (décommissionné ?)")
 
-// uploadClient is dedicated to UploadFile and never reuses a connection
-// across requests (DisableKeepAlives). Every other call on this package
-// shares Go's default transport and its keep-alive pool, which is fine for
-// small, quick requests - but a large file upload that dies mid-transfer
-// (a network blip, a server restart) can leave that shared TCP connection
-// in an indeterminate state; net/http is not always able to tell it apart
-// from one that's merely idle before the next request tries to reuse it,
-// and a request landing on a half-dead connection reads back as
-// nonsensical errors (a stray 405 for a perfectly normal request) that
-// have nothing to do with that request itself. Concurrent uploads for the
-// same device make this worse purely by having more connections in the
-// pool for one bad one to hide among. Uploads always paying for a fresh
-// TCP handshake is a trivial cost next to transferring the file itself.
+// uploadClient is dedicated to UploadFile. Keep-alives were briefly
+// disabled here entirely: a large upload that died mid-transfer could
+// leave its TCP connection in an indeterminate state, and a later request
+// reusing it read back as a nonsensical error (a stray 405) unrelated to
+// that request. The real culprit behind those mid-transfer deaths turned
+// out to be macOS's sendfile() (see noReaderFrom below), not connection
+// reuse itself - now that uploads never take that path, there's nothing
+// left routinely leaving a connection in a bad state, and paying for a
+// fresh TCP handshake (plus, on a routed/VPN path, its higher RTT) for
+// every single one of what can be tens of thousands of small files was
+// most of what made backups feel slow. MaxIdleConnsPerHost is raised well
+// past Go's default of 2 so every one of uploadConcurrency's concurrent
+// workers actually gets to keep its own connection warm between files,
+// instead of most of them still opening fresh ones because the pool was
+// too small to hold them all.
 var uploadClient = &http.Client{
 	Timeout:   30 * time.Minute,
-	Transport: &http.Transport{DisableKeepAlives: true},
+	Transport: &http.Transport{MaxIdleConnsPerHost: 32},
 }
 
 type Client struct {

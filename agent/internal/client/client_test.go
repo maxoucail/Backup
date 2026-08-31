@@ -8,27 +8,30 @@ import (
 	"testing"
 )
 
-// UploadFile must never reuse a pooled keep-alive connection across
-// separate uploads. This is the exact shape of a real field failure: a
-// large backup with several concurrent uploads, one of which dies
-// mid-transfer (a network blip, a server restart). If the next upload on
-// that worker reused the same pooled connection, it can land on one
-// net/http hasn't fully recognized as dead yet - and a perfectly normal
-// request reads back as a nonsensical error (a stray 405) that has
-// nothing to do with it. Checked directly on uploadClient's configuration
-// rather than by observing connection reuse over a real socket: Go's
-// http.Response.Body.Close() opportunistically drains and reuses a
-// connection for a small enough response regardless of this setting, so a
-// behavioral test against a local httptest server doesn't reliably tell
-// the two configurations apart - the setting itself is what actually
-// governs behavior against a real, larger, unpredictable network path.
-func TestUploadClientDisablesKeepAlives(t *testing.T) {
+// uploadClient must let connections be reused (keep-alives on - the
+// zero-value default, but worth asserting so a future edit doesn't
+// silently reintroduce DisableKeepAlives) and must be able to hold onto
+// enough idle ones for every concurrent upload worker to keep its own
+// warm between files - otherwise most of them still pay for a fresh TCP
+// handshake (and its RTT, worse over a routed/VPN path) per file despite
+// keep-alives nominally being on, since Go's default MaxIdleConnsPerHost
+// of 2 would evict the rest immediately. maxKnownUploadConcurrency
+// mirrors backupjob.uploadConcurrency (can't import it directly:
+// backupjob already imports this package) - bump both together if that
+// value changes.
+const maxKnownUploadConcurrency = 8
+
+func TestUploadClientReusesConnectionsAcrossAllWorkers(t *testing.T) {
 	tr, ok := uploadClient.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("uploadClient.Transport = %T, attendu *http.Transport", uploadClient.Transport)
 	}
-	if !tr.DisableKeepAlives {
-		t.Fatal("uploadClient doit désactiver les keep-alives (DisableKeepAlives = true)")
+	if tr.DisableKeepAlives {
+		t.Fatal("uploadClient ne doit plus désactiver les keep-alives : le vrai problème était sendfile, pas la réutilisation de connexion")
+	}
+	if tr.MaxIdleConnsPerHost < maxKnownUploadConcurrency {
+		t.Fatalf("MaxIdleConnsPerHost = %d, attendu au moins %d pour que chaque worker garde sa connexion au chaud",
+			tr.MaxIdleConnsPerHost, maxKnownUploadConcurrency)
 	}
 }
 
