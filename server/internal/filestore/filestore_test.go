@@ -164,6 +164,34 @@ func TestEveryKindOfModificationIsSentAgain(t *testing.T) {
 	}
 }
 
+// NeededFiles' disk fallback (for a file with no index entry yet) used to
+// stat() the NAS once per such file - a real cost turned real by an
+// operator report: on a large, partly-unindexed tree over a network
+// mount, that was hours of individual round trips before a backup could
+// even start uploading. It now walks the live mirror once instead (see
+// actualFiles) - this proves that walk doesn't wander into preserved
+// versions, which sit at the same relative depth as the live mirror and
+// would otherwise be needless (and, if ever misread as "the machine's
+// current files", wrong) extra work.
+func TestActualFilesExcludesPreservedVersions(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+	confirm(t, s, dir, "snap1", "Bureau/f.txt", "contenu", ns(1700000000))
+	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	actual := s.actualFiles(dir)
+	for rel := range actual {
+		if strings.Contains(rel, VersionsDirName) {
+			t.Fatalf("actualFiles a inclus un chemin sous %s : %s", VersionsDirName, rel)
+		}
+	}
+	if _, ok := actual["Bureau/f.txt"]; !ok {
+		t.Fatalf("actualFiles = %v, attendu Bureau/f.txt (le fichier de la sauvegarde actuelle)", actual)
+	}
+}
+
 // The blind spot of any size+date comparison: a file modified again during
 // the very second the agent read it keeps the same size and the same
 // second, so nothing ever looks different and the NAS copy stays stale

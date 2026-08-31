@@ -467,6 +467,14 @@ func (s *Store) saveIndex(deviceDir string, idx fileIndex) error {
 // never changes again is never at risk either way - there's nothing for
 // any comparison method to miss.
 //
+// That fallback used to stat() the NAS once per unindexed file - fine for
+// the handful of stragglers it was designed for, ruinous on a machine
+// with a genuinely large or partly-unindexed tree over a real network
+// mount: hundreds of thousands of individual round trips, every one of
+// them before the backup can even start uploading. actualFiles below
+// walks the live mirror once instead, on the first path that needs it,
+// and every later fallback lookup for this call is an in-memory map read.
+//
 // On top of either comparison, a file whose modification time is at or
 // after the start of the last successful backup is always re-sent
 // regardless: it may have changed after being read, and no comparison
@@ -485,6 +493,12 @@ func (s *Store) NeededFiles(deviceDir string, files []FileInfo, lastBackupStart 
 	if !lastBackupStart.IsZero() {
 		unstableFrom = lastBackupStart.UnixNano()
 	}
+
+	// Populated lazily, at most once: a machine whose index is complete
+	// (the overwhelmingly common case, every run after the first) never
+	// pays for this walk at all.
+	var actual map[string]os.FileInfo
+
 	for _, f := range files {
 		rel, err := RelPath(f.Path)
 		if err != nil {
@@ -497,9 +511,12 @@ func (s *Store) NeededFiles(deviceDir string, files []FileInfo, lastBackupStart 
 				continue
 			}
 		} else {
+			if actual == nil {
+				actual = s.actualFiles(deviceDir)
+			}
 			announcedSeconds := time.Unix(0, f.ModTime).Unix()
-			info, err := os.Stat(filepath.Join(deviceDir, rel))
-			if err != nil || info.Size() != f.Size || info.ModTime().Unix() != announcedSeconds {
+			info, ok := actual[rel]
+			if !ok || info.Size() != f.Size || info.ModTime().Unix() != announcedSeconds {
 				needed = append(needed, f.Path)
 				continue
 			}
@@ -510,6 +527,37 @@ func (s *Store) NeededFiles(deviceDir string, files []FileInfo, lastBackupStart 
 		}
 	}
 	return needed
+}
+
+// actualFiles walks a machine's live mirror once, keyed the same way as
+// IndexFileName (RelPath-relative to deviceDir), for NeededFiles' fallback
+// comparison when a file has no index entry yet. Previous versions are
+// excluded the same way CurrentUsedBytes excludes them: they are not part
+// of what NeededFiles is checking against.
+func (s *Store) actualFiles(deviceDir string) map[string]os.FileInfo {
+	actual := make(map[string]os.FileInfo)
+	versionsDir := filepath.Join(deviceDir, VersionsDirName)
+	_ = filepath.Walk(deviceDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if p == versionsDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(deviceDir, p)
+		if err != nil {
+			return nil
+		}
+		actual[rel] = info
+		return nil
+	})
+	return actual
 }
 
 func (s *Store) pendingPath(deviceDir, snapshotID string) string {
