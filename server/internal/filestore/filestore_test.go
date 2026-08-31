@@ -177,7 +177,7 @@ func TestActualFilesExcludesPreservedVersions(t *testing.T) {
 	s := newStore(t)
 	dir := s.DeviceDir("dev1", "PC")
 	confirm(t, s, dir, "snap1", "Bureau/f.txt", "contenu", ns(1700000000))
-	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+	if _, _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -372,7 +372,7 @@ func TestPreviousVersionKeepsItsOwnContentAfterAnUpdate(t *testing.T) {
 
 	put(t, s, dir, "Bureau/rapport.docx", "VERSION 1", ns(1700000000))
 
-	versionDir, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0))
+	versionDir, _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0))
 	if err != nil {
 		t.Fatalf("SnapshotCurrent: %v", err)
 	}
@@ -387,6 +387,36 @@ func TestPreviousVersionKeepsItsOwnContentAfterAnUpdate(t *testing.T) {
 	}
 	if got := read(t, filepath.Join(versionDir, "Bureau", "rapport.docx")); got != "VERSION 1" {
 		t.Fatalf("ancienne version = %q, attendu \"VERSION 1\" - l'écriture a écrasé les données partagées", got)
+	}
+}
+
+// SnapshotCurrent's byte count is a byproduct of the same walk that
+// creates the hard links - the caller (see api/agent_backup.go) records
+// it in the database immediately so the versions panel never has to walk
+// this version's tree itself just to learn its size. That number must
+// exactly match what a real walk of the finished version directory finds,
+// or "instant" would just mean "instantly wrong".
+func TestSnapshotCurrentReportsTheSameSizeAWalkWouldFind(t *testing.T) {
+	s := newStore(t)
+	dir := s.DeviceDir("dev1", "PC")
+
+	put(t, s, dir, "Bureau/rapport.docx", "un contenu quelconque", ns(1700000000))
+	put(t, s, dir, "Documents/facture.pdf", "un autre contenu, plus long celui-ci", ns(1700000000))
+
+	versionDir, totalBytes, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0))
+	if err != nil {
+		t.Fatalf("SnapshotCurrent: %v", err)
+	}
+	if versionDir == "" {
+		t.Fatal("aucune version créée alors que la machine avait déjà des fichiers")
+	}
+
+	want := s.DeviceUsedBytes(versionDir)
+	if totalBytes != want {
+		t.Fatalf("totalBytes = %d, attendu %d (ce qu'un parcours du dossier de version trouve réellement)", totalBytes, want)
+	}
+	if totalBytes == 0 {
+		t.Fatal("totalBytes = 0, le test n'aurait rien prouvé")
 	}
 }
 
@@ -408,7 +438,7 @@ func TestOldVersionsShareDiskSpaceWithTheCurrentBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if _, err := s.SnapshotCurrent(dir, time.Unix(int64(1700003600+i*3600), 0)); err != nil {
+		if _, _, err := s.SnapshotCurrent(dir, time.Unix(int64(1700003600+i*3600), 0)); err != nil {
 			t.Fatalf("SnapshotCurrent: %v", err)
 		}
 	}
@@ -440,7 +470,7 @@ func TestRotateKeepsTheRequestedNumberAndNeverEmptiesTheFolder(t *testing.T) {
 	put(t, s, dir, "Bureau/a.txt", "contenu", ns(1700000000))
 
 	for i := 0; i < 5; i++ {
-		if _, err := s.SnapshotCurrent(dir, time.Unix(int64(1700003600+i*3600), 0)); err != nil {
+		if _, _, err := s.SnapshotCurrent(dir, time.Unix(int64(1700003600+i*3600), 0)); err != nil {
 			t.Fatalf("SnapshotCurrent: %v", err)
 		}
 	}
@@ -477,7 +507,7 @@ func TestDeletedFileLeavesTheMirrorButStaysInThePreviousVersion(t *testing.T) {
 	put(t, s, dir, "Bureau/garde.txt", "toujours là", ns(1700000000))
 	put(t, s, dir, "Bureau/supprime.txt", "effacé par l'utilisateur", ns(1700000000))
 
-	versionDir, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0))
+	versionDir, _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +536,7 @@ func TestPruneRemovedNeverTouchesTheVersionsDirectory(t *testing.T) {
 	s := newStore(t)
 	dir := s.DeviceDir("dev1", "PC")
 	put(t, s, dir, "Bureau/a.txt", "contenu", ns(1700000000))
-	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+	if _, _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -575,7 +605,7 @@ func TestRemoveVersionOnlyDeletesVersions(t *testing.T) {
 	s := newStore(t)
 	dir := s.DeviceDir("dev1", "PC")
 	put(t, s, dir, "Bureau/a.txt", "contenu", ns(1700000000))
-	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+	if _, _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
 		t.Fatal(err)
 	}
 	name := s.ListVersions(dir)[0]
@@ -646,7 +676,7 @@ func TestRenameDeviceMovesTheExistingBackup(t *testing.T) {
 	s := newStore(t)
 	oldDir := s.DeviceDir("dev1", "PC-Ancien")
 	put(t, s, oldDir, "Bureau/rapport.docx", "contenu du rapport", ns(1700000000))
-	if _, err := s.SnapshotCurrent(oldDir, time.Unix(1700003600, 0)); err != nil {
+	if _, _, err := s.SnapshotCurrent(oldDir, time.Unix(1700003600, 0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -741,7 +771,7 @@ func TestRemoveCurrentWipesTheLiveMirrorButKeepsVersions(t *testing.T) {
 	s := newStore(t)
 	dir := s.DeviceDir("dev1", "PC")
 	confirm(t, s, dir, "snap1", "Bureau/rapport.docx", "contenu", ns(1700000000))
-	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+	if _, _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
 		t.Fatal(err)
 	}
 	confirm(t, s, dir, "snap2", "Bureau/rapport.docx", "contenu modifie", ns(1700003600))
@@ -774,7 +804,7 @@ func TestCurrentUsedBytesExcludesPreservedVersions(t *testing.T) {
 	s := newStore(t)
 	dir := s.DeviceDir("dev1", "PC")
 	confirm(t, s, dir, "snap1", "Bureau/rapport.docx", "contenu", ns(1700000000))
-	if _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
+	if _, _, err := s.SnapshotCurrent(dir, time.Unix(1700003600, 0)); err != nil {
 		t.Fatal(err)
 	}
 	confirm(t, s, dir, "snap2", "Bureau/rapport.docx", "contenu modifie", ns(1700003600))

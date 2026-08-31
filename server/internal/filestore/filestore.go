@@ -232,13 +232,23 @@ type FileInfo struct {
 //
 // The copy is made of hard links: it's near-instant and costs no extra
 // space, however large the tree.
-func (s *Store) SnapshotCurrent(deviceDir string, at time.Time) (string, error) {
+//
+// totalBytes is this new version's footprint, counted as a byproduct of
+// the same walk that creates the hard links - not a second pass. The
+// caller (see api/agent_backup.go) records it in the database right away
+// via models.SetCachedSize, so the versions panel's size for this version
+// is already known the very first time anyone asks, rather than being
+// computed - a full walk of its own - on that first request. This is what
+// actually makes a new version's size instant to display: the panel-side
+// cache added afterwards only ever helps versions created before it
+// existed.
+func (s *Store) SnapshotCurrent(deviceDir string, at time.Time) (versionDir string, totalBytes int64, err error) {
 	if _, err := os.Stat(deviceDir); os.IsNotExist(err) {
-		return "", nil // first ever backup: nothing to preserve yet
+		return "", 0, nil // first ever backup: nothing to preserve yet
 	}
 	entries, err := os.ReadDir(deviceDir)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	hasContent := false
 	for _, e := range entries {
@@ -248,10 +258,10 @@ func (s *Store) SnapshotCurrent(deviceDir string, at time.Time) (string, error) 
 		}
 	}
 	if !hasContent {
-		return "", nil
+		return "", 0, nil
 	}
 
-	versionDir := filepath.Join(deviceDir, VersionsDirName, at.Format(versionTimeLayout))
+	versionDir = filepath.Join(deviceDir, VersionsDirName, at.Format(versionTimeLayout))
 	// A second backup within the same minute would otherwise collide with
 	// the previous version directory.
 	for i := 1; ; i++ {
@@ -260,50 +270,68 @@ func (s *Store) SnapshotCurrent(deviceDir string, at time.Time) (string, error) 
 		}
 		versionDir = filepath.Join(deviceDir, VersionsDirName, fmt.Sprintf("%s-%d", at.Format(versionTimeLayout), i))
 		if i > 100 {
-			return "", fmt.Errorf("impossible de nommer une nouvelle version")
+			return "", 0, fmt.Errorf("impossible de nommer une nouvelle version")
 		}
 	}
 	if err := os.MkdirAll(versionDir, 0o750); err != nil {
-		return "", err
+		return "", 0, err
 	}
 
+	seen := make(map[uint64]bool)
 	for _, e := range entries {
 		if isReservedName(e.Name()) {
 			continue
 		}
-		if err := s.linkTree(filepath.Join(deviceDir, e.Name()), filepath.Join(versionDir, e.Name())); err != nil {
-			return "", err
+		n, err := s.linkTree(filepath.Join(deviceDir, e.Name()), filepath.Join(versionDir, e.Name()), seen)
+		if err != nil {
+			return "", 0, err
 		}
+		totalBytes += n
 	}
-	return versionDir, nil
+	return versionDir, totalBytes, nil
 }
 
 // linkTree recreates src at dst, hard-linking files rather than copying
-// their contents.
-func (s *Store) linkTree(src, dst string) error {
+// their contents, and returns the number of bytes it actually accounts
+// for - a file whose inode has already been counted once through another
+// hard link (seen) contributes nothing more, the same dedup
+// DeviceUsedBytes/CurrentUsedBytes apply when measuring after the fact.
+func (s *Store) linkTree(src, dst string, seen map[uint64]bool) (int64, error) {
 	info, err := os.Lstat(src)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if info.IsDir() {
 		if err := os.MkdirAll(dst, 0o750); err != nil {
-			return err
+			return 0, err
 		}
 		entries, err := os.ReadDir(src)
 		if err != nil {
-			return err
+			return 0, err
 		}
+		var total int64
 		for _, e := range entries {
-			if err := s.linkTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
-				return err
+			n, err := s.linkTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), seen)
+			if err != nil {
+				return 0, err
 			}
+			total += n
 		}
-		return nil
+		return total, nil
 	}
 	if !info.Mode().IsRegular() {
-		return nil
+		return 0, nil
 	}
-	return s.LinkOrCopy(src, dst)
+	if err := s.LinkOrCopy(src, dst); err != nil {
+		return 0, err
+	}
+	if ino, nlink, ok := fileIdentity(info); ok && nlink > 1 {
+		if seen[ino] {
+			return 0, nil
+		}
+		seen[ino] = true
+	}
+	return info.Size(), nil
 }
 
 // LinkOrCopy hard-links src to dst, falling back to a byte copy when the

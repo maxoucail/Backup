@@ -229,7 +229,7 @@ func TestDeleteVersionRequiresRetypingTheExactVersionName(t *testing.T) {
 	if _, err := store.WriteFile(dir, "Bureau/a.txt", strings.NewReader("v1"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SnapshotCurrent(dir, time.Now()); err != nil {
+	if _, _, err := store.SnapshotCurrent(dir, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	name := store.ListVersions(dir)[0]
@@ -267,7 +267,7 @@ func TestDeleteCurrentRequiresRetypingTheDeviceNameAndKeepsVersions(t *testing.T
 	if _, err := store.WriteFile(dir, "Bureau/a.txt", strings.NewReader("v1"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SnapshotCurrent(dir, time.Now()); err != nil {
+	if _, _, err := store.SnapshotCurrent(dir, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.WriteFile(dir, "Bureau/a.txt", strings.NewReader("v2"), 0); err != nil {

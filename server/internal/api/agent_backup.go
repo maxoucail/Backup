@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"backup-server/internal/filestore"
@@ -120,7 +121,7 @@ func (a *API) handleAgentPlan(w http.ResponseWriter, r *http.Request, deviceID, 
 	// Preserve the current state before touching it, so a complete
 	// previous version always exists even if this backup is interrupted
 	// halfway through.
-	versionDir, err := store.SnapshotCurrent(deviceDir, time.Now())
+	versionDir, versionBytes, err := store.SnapshotCurrent(deviceDir, time.Now())
 	if err != nil {
 		log.Printf("plan: création de la version précédente pour %s: %v", device.Name, err)
 		writeError(w, http.StatusInternalServerError, "impossible de préparer la nouvelle version")
@@ -128,6 +129,12 @@ func (a *API) handleAgentPlan(w http.ResponseWriter, r *http.Request, deviceID, 
 	}
 	if versionDir != "" {
 		log.Printf("sauvegarde %s: version précédente conservée dans %s", device.Name, versionDir)
+		// Recorded right away rather than left for the versions panel to
+		// discover on its own: SnapshotCurrent already walked this whole
+		// tree to create the hard links, so its size came out of that walk
+		// for free - computing it again on the first page load that asks
+		// would just be paying for the same walk twice.
+		_ = models.SetCachedSize(a.DB, device.ID, filepath.Base(versionDir), versionBytes)
 	}
 
 	if removed := store.PruneRemoved(deviceDir, req.Files); removed > 0 {
