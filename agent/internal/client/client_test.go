@@ -1,11 +1,14 @@
 package client
 
 import (
+	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // uploadClient must let connections be reused (keep-alives on - the
@@ -70,5 +73,33 @@ func TestNoReaderFromHidesTheFileTypeFromSendfileDetection(t *testing.T) {
 	}
 	if string(data) != "hello" {
 		t.Fatalf("contenu lu = %q, attendu %q (le wrapper doit rester un simple passe-plat pour Read)", data, "hello")
+	}
+}
+
+// The exact bug reported from a real device with 35000+ files: the server
+// rewrites this device's whole file index before answering /finish (see
+// filestore.ConfirmUpdates), which on a slow NAS took longer than the
+// previous 30-second client timeout - the agent gave up and logged the
+// run as failed while the server went on to actually mark it successful.
+// A generous timeout must never be the reason a genuinely completed
+// backup gets reported as an error.
+func TestFinishSnapshotTimeoutSurvivesASlowServerResponse(t *testing.T) {
+	if finishSnapshotTimeout < 5*time.Minute {
+		t.Fatalf("finishSnapshotTimeout = %v, trop court pour un gros index réécrit sur un NAS lent", finishSnapshotTimeout)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Stands in for a slow ConfirmUpdates on a real NAS - short enough
+		// to keep the test fast, but well past the old 30-second timeout's
+		// failure mode if that regressed.
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":"true"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "dev1", "secret")
+	if err := c.FinishSnapshot(context.Background(), "snap1", "success", "", 0); err != nil {
+		t.Fatalf("FinishSnapshot: %v (une réponse tardive mais réelle ne doit jamais être prise pour un échec)", err)
 	}
 }

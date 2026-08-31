@@ -236,12 +236,24 @@ func (c *Client) UploadFile(ctx context.Context, relPath string, modTime, size i
 	return doJSON(uploadClient, req, nil)
 }
 
+// finishSnapshotTimeout used to be 30 seconds - fine for a small backup,
+// but the server rewrites this device's whole file index before it can
+// answer (see filestore.ConfirmUpdates), and for tens of thousands of
+// files on a slow NAS that alone can take longer than that. The real bug
+// this caused: the server would go on to actually finish and mark the
+// snapshot successful, but the agent had already given up waiting and
+// logged the run as failed - a backup that genuinely succeeded, showing
+// up as an error in its own event history. Matches Plan's timeout for the
+// same reason: a legitimately slow server-side step must not be mistaken
+// for a dead connection.
+const finishSnapshotTimeout = 30 * time.Minute
+
 func (c *Client) FinishSnapshot(ctx context.Context, snapshotID, status, errMsg string, uploadedBytes int64) error {
 	body, _ := json.Marshal(map[string]any{"status": status, "error_message": errMsg, "uploaded_bytes": uploadedBytes})
 	req, err := c.authRequest(ctx, http.MethodPost, "/api/agent/snapshots/"+snapshotID+"/finish", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: finishSnapshotTimeout}
 	return doJSON(client, req, nil)
 }
