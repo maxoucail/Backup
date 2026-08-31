@@ -157,7 +157,25 @@ func Walk(roots []Root) []FileEntry {
 	var out []FileEntry
 
 	for _, root := range roots {
-		_ = filepath.WalkDir(root.Path, func(p string, d fs.DirEntry, err error) error {
+		// filepath.WalkDir lstats the root itself: if root.Path is a
+		// symlink (not one it encounters mid-walk, which it deliberately
+		// never follows - that part is correct and stays that way), the
+		// DirEntry it gets back reports a symlink, not a directory, and the
+		// loop below skips it as "not a regular file" - silently walking
+		// zero files, no error anywhere. This is a real, common case on
+		// macOS: enabling iCloud Drive's "Desktop & Documents Folders" sync
+		// replaces ~/Desktop and ~/Documents with symlinks into
+		// ~/Library/Mobile Documents/..., so a machine that was backing up
+		// tens of GB can silently drop to whatever's left in the untouched
+		// folders the moment that setting gets turned on. Resolving the
+		// root to its real target before walking - but keeping root.Name
+		// for the logical NAS path - fixes the walk without touching the
+		// "don't follow symlinks found during the walk" behaviour at all.
+		walkRoot := root
+		if resolved, err := filepath.EvalSymlinks(root.Path); err == nil {
+			walkRoot.Path = resolved
+		}
+		_ = filepath.WalkDir(walkRoot.Path, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				log.Printf("scanner: skipping %s: %v", p, err)
 				return nil
@@ -188,7 +206,7 @@ func Walk(roots []Root) []FileEntry {
 
 			out = append(out, FileEntry{
 				AbsPath: abs,
-				RelPath: relPath(root, home, abs),
+				RelPath: relPath(walkRoot, home, abs),
 				Size:    info.Size(),
 				ModTime: info.ModTime().UnixNano(),
 			})

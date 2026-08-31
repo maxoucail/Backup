@@ -91,6 +91,34 @@ func TestWalkExcludesRecycleBin(t *testing.T) {
 	}
 }
 
+// The exact regression an operator hit: enabling iCloud Drive's "Desktop &
+// Documents Folders" sync on macOS replaces ~/Desktop (and ~/Documents)
+// with a symlink into ~/Library/Mobile Documents/com~apple~CloudDocs/... .
+// filepath.WalkDir lstats the root it's given, so a symlinked root reports
+// as "not a directory" and the whole folder silently contributes zero
+// files - no error, no log line an operator would ever see, just a backup
+// that quietly shrank from tens of GB to whatever was left in the
+// untouched folders.
+func TestWalkFollowsASymlinkedRoot(t *testing.T) {
+	target := t.TempDir()
+	mustWrite(t, filepath.Join(target, "photo.jpg"), "contenu")
+
+	parent := t.TempDir()
+	link := filepath.Join(parent, "Desktop")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks non supportés sur cette plateforme de test: %v", err)
+	}
+
+	files := Walk([]Root{{Path: link, Name: "Desktop"}})
+
+	if len(files) != 1 {
+		t.Fatalf("fichiers trouvés = %d à travers une racine en lien symbolique, attendu 1 (%v)", len(files), files)
+	}
+	if files[0].RelPath != "Desktop/photo.jpg" {
+		t.Fatalf("RelPath = %q, attendu %q (le nom logique doit survivre à la résolution du lien)", files[0].RelPath, "Desktop/photo.jpg")
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

@@ -407,6 +407,21 @@ jour à l'autre ; ça aide en pratique mais ne le garantit pas complètement
 comme le ferait un vrai certificat Developer ID payant - une réinstallation
 après une mise à jour plus profonde peut encore redemander l'autorisation.
 
+Troisième piège, sans rapport avec TCC cette fois : `scanner.Walk` marche
+chaque racine avec `filepath.WalkDir`, qui fait un `lstat` sur la racine
+elle-même - si Bureau ou Documents est un **lien symbolique** plutôt qu'un
+vrai dossier, `WalkDir` le voit comme "pas un répertoire" et en ressort
+zéro fichier, silencieusement, sans la moindre erreur. C'est exactement ce
+que produit iCloud Drive quand l'option "Bureau et Documents" est activée :
+macOS remplace `~/Desktop` et `~/Documents` par des liens vers
+`~/Library/Mobile Documents/com~apple~CloudDocs/...`, et une machine qui
+sauvegardait 70 Go se retrouve à n'en trouver que ce qu'il reste dans les
+dossiers non touchés (Téléchargements, Images). `Walk` résout maintenant
+la racine avec `filepath.EvalSymlinks` avant de la marcher (tout en gardant
+`root.Name` pour le nommage logique sur le NAS), sans changer le
+comportement volontaire de ne jamais suivre un lien symbolique rencontré
+*pendant* le parcours.
+
 ## Sauvegarde manquée et rattrapage programmé
 
 Chaque sauvegarde planifiée réussie enregistre la date de la prochaine
