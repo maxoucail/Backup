@@ -439,6 +439,15 @@ Windows, un sous-processus `caffeinate -i -s` sur macOS - relâché dès que
 la sauvegarde se termine, réussite ou échec. `runBackup` (main.go)
 l'appelle avant `backupjob.Run` et le relâche en `defer`.
 
+Piège réel rencontré sur une vraie machine : `exec.Command("caffeinate", ...)`
+cherche le binaire via `$PATH` - mais l'agent tourne en LaunchDaemon
+système (root, sans session utilisateur), qui n'a aucune garantie d'avoir
+cette variable renseignée. Sans elle, le lancement échouait
+silencieusement (juste une ligne de log), et la machine restait libre de
+s'endormir malgré un agent parfaitement à jour. `keepawake_darwin.go`
+utilise maintenant le chemin absolu `/usr/bin/caffeinate` (stable depuis
+Mac OS X 10.8) plutôt qu'une recherche par `$PATH`.
+
 Cette protection a une limite assumée sur les deux plateformes : elle
 n'empêche que la veille *automatique* (le système qui décide de lui-même
 que rien ne se passe). Elle ne peut pas empêcher un utilisateur qui ferme
