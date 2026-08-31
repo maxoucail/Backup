@@ -159,6 +159,20 @@ func (h *Hub) ServeAgent(w http.ResponseWriter, r *http.Request, deviceID, remot
 	_ = models.SetDeviceStatus(h.db, deviceID, "offline")
 	_ = models.AddEvent(h.db, &deviceID, models.EventLevelInfo, "Agent déconnecté.")
 
+	// Closes out a snapshot this device left "running" right away, rather
+	// than leaving it looking like a backup still in progress for however
+	// long it takes the scheduler's own hours-later stale-backup sweep to
+	// notice. If the agent's disconnect actually raced its own legitimate
+	// finish call over HTTP (a WS-only blip on an otherwise-healthy
+	// upload), that later call still lands and overwrites this with the
+	// real outcome - this is a safe, self-correcting default, not a final
+	// verdict that can strand a row on a false "failed".
+	if n, err := models.FailRunningSnapshotsForDevice(h.db, deviceID,
+		"connexion perdue avec la machine pendant la sauvegarde"); err == nil && n > 0 {
+		_ = models.AddEvent(h.db, &deviceID, models.EventLevelWarning,
+			"Sauvegarde interrompue par la déconnexion de l'agent.")
+	}
+
 	if h.OnDisconnect != nil {
 		h.OnDisconnect(deviceID)
 	}

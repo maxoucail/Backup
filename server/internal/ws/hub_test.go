@@ -82,6 +82,52 @@ func TestSendCommandDuringReconnectDoesNotPanic(t *testing.T) {
 	// closed channel would have panicked and failed the test binary.
 }
 
+// This is the exact gap a real operator hit: a snapshot a device left
+// "running" (crashed, killed, network dropped) used to sit at "running"
+// until the scheduler's own stale-backup sweep finally closed it out -
+// hours later (see scheduler.staleBackupAfter) - all the while looking
+// like a backup still genuinely in progress. The disconnect itself, which
+// happens immediately, must close it out right away instead.
+func TestDisconnectClosesOutARunningSnapshotAsFailed(t *testing.T) {
+	hub := newTestHub(t)
+	if _, err := hub.db.Exec(
+		`INSERT INTO snapshots (id, device_id, kind, status, started_at) VALUES ('snap1', 'dev1', 'manual', 'running', datetime('now'))`,
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeAgent(w, r, "dev1", "127.0.0.1")
+	}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Give ServeAgent a moment to register the connection before tearing
+	// it down, so this exercises a real connect-then-disconnect rather
+	// than racing the handshake.
+	time.Sleep(20 * time.Millisecond)
+	_ = conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var status string
+	for time.Now().Before(deadline) {
+		if err := hub.db.QueryRow(`SELECT status FROM snapshots WHERE id = 'snap1'`).Scan(&status); err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		if status != "running" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if status != "failed" {
+		t.Fatalf("statut de la sauvegarde après déconnexion = %q, attendu %q", status, "failed")
+	}
+}
+
 // OnConnect is how main.go hooks the overdue-on-reconnect check (see
 // offerRescheduleIfOverdue in cmd/backup-server): it must fire for every
 // new connection, with the right device ID, before the caller can rely on

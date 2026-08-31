@@ -106,9 +106,13 @@ const deviceId = window.location.pathname.split("/").pop();
 
 function snapshotRow(s) {
 	const size = fmtBytes(s.logical_bytes);
-	const deleteBtn = s.status !== "running"
-		? `<button class="btn danger small" onclick="deleteSnapshot('${s.id}')" title="Retire cette ligne de l'historique. Les fichiers sur le NAS ne sont pas touchés.">Retirer de l'historique</button>`
-		: "";
+	// A running snapshot can't be removed from history yet (the server
+	// refuses that - an agent mid-upload still needs its row) but can be
+	// stopped; once cancelled it lands in the "not running" case on the
+	// very next poll and the usual delete button takes over from there.
+	const actionBtn = s.status === "running"
+		? `<button class="btn secondary small" onclick="cancelSnapshot()" title="Demande à l'appareil d'arrêter cette sauvegarde. Les fichiers déjà envoyés restent sur le NAS.">Arrêter</button>`
+		: `<button class="btn danger small" onclick="deleteSnapshot('${s.id}')" title="Retire cette ligne de l'historique. Les fichiers sur le NAS ne sont pas touchés.">Retirer de l'historique</button>`;
 	const progress = s.status === "running"
 		? `<div class="progress-bar"><div style="width:${s.progress_percent}%"></div></div>`
 		: (s.status === "success" ? "100%" : "—");
@@ -119,7 +123,7 @@ function snapshotRow(s) {
 		<td>${s.file_count}</td>
 		<td>${size}</td>
 		<td style="min-width:100px;">${progress}</td>
-		<td>${deleteBtn}</td>
+		<td>${actionBtn}</td>
 	</tr>`;
 }
 
@@ -193,6 +197,23 @@ document.getElementById("policy-form").addEventListener("submit", async (e) => {
 		toast(err.message, "error");
 	}
 });
+
+// Cancels whatever this device's agent is currently doing - there's only
+// ever one job running per device (the queue enforces that), so unlike
+// delete this needs no snapshot ID. The agent finishes the snapshot as
+// "cancelled" itself once it sees the command; load() below picks that up
+// on the next poll and the row switches from "Arrêter" to the normal
+// delete button on its own, no special-casing needed here for that part.
+async function cancelSnapshot() {
+	if (!confirm("Arrêter la sauvegarde en cours sur cet appareil ? Les fichiers déjà envoyés restent sur le NAS.")) return;
+	try {
+		await api("POST", `/api/devices/${deviceId}/cancel`);
+		toast("Demande d'arrêt envoyée à l'appareil.", "success");
+		load();
+	} catch (err) {
+		toast(err.message, "error");
+	}
+}
 
 async function deleteSnapshot(snapshotId) {
 	if (!confirm("Retirer cette ligne de l'historique ? Les fichiers sauvegardés sur le NAS ne sont pas supprimés.")) return;

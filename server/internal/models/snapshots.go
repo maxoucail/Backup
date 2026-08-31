@@ -90,6 +90,29 @@ func FinishSnapshot(db *sql.DB, id, status, errMsg string) error {
 	return err
 }
 
+// FailRunningSnapshotsForDevice closes out any snapshot this device left
+// marked "running" - called the moment its WebSocket connection drops
+// (see ws.Hub.ServeAgent), so a disconnect never leaves a stale "running"
+// row behind. Before this, only the queue slot was released immediately;
+// the snapshot row itself sat at "running" until the scheduler's own
+// stale-backup sweep (hours later, see scheduler.staleBackupAfter) finally
+// closed it - a long stretch where the history showed a backup as still
+// in progress when the machine had, in fact, already gone. Reports how
+// many rows it closed so the caller can decide whether an event is worth
+// logging; a clean finish (no running row at all) is the common case and
+// not itself news.
+func FailRunningSnapshotsForDevice(db *sql.DB, deviceID, errMsg string) (int64, error) {
+	res, err := db.Exec(
+		`UPDATE snapshots SET status=?, finished_at=?, error_message=?, progress_percent=100
+		 WHERE device_id=? AND status=?`,
+		SnapshotStatusFailed, toDB(time.Now()), errMsg, deviceID, SnapshotStatusRunning,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // LastSuccessfulSnapshotStart returns when this device's most recent
 // successful backup began, or the zero time if it has never had one.
 //
